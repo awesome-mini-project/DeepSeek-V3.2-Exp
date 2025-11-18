@@ -72,7 +72,9 @@ This experimental release represents our ongoing research into more efficient tr
 | SWE-bench Multilingual | 57.8 | 57.9 |
 | Terminal-bench | 36.7 | 37.7 |
 
+## Update
 
+- 2025.11.17: **We have identified that previous versions of the inference demo code contained an implementation discrepancy in Rotary Position Embedding (RoPE) within the indexer module, potentially leading to degraded model performance.** Specifically, the input tensor to RoPE in the indexer module requires a non-interleaved layout, whereas RoPE in the MLA module expects an interleaved layout. This issue has now been resolved. Please refer to the updated version of the inference demo code and take note of this implementation detail.
 
 ## Open-Source Kernels
 

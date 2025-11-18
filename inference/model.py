@@ -281,7 +281,6 @@ class RMSNorm(nn.Module):
         super().__init__()
         self.dim = dim
         self.eps = eps
-        # rmsnorm in the checkpoint is stored in bf16, while the parameter here is stored in fp32 for convenient.
         self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
 
     def forward(self, x: torch.Tensor, residual: Optional[torch.Tensor] = None):
@@ -315,7 +314,6 @@ class LayerNorm(nn.Module):
         super().__init__()
         self.dim = dim
         self.eps = eps
-        # layernorm in the checkpoint is stored in bf16, while the parameters here are stored in fp32 for convenient.
         self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.bias = nn.Parameter(torch.zeros(dim, dtype=torch.float32))
 
