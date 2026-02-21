@@ -23,6 +23,15 @@ torchrun --nproc-per-node ${MP} generate.py --ckpt-path ${SAVE_PATH} --config ${
 
 ## DSA trace instrumentation
 
+Quickstart (see `INSTRUMENTATION.md` for full guide):
+
+```bash
+export CKPT_PATH="${SAVE_PATH}"
+./scripts/run_trace_ruler.sh
+./scripts/run_trace_longbenchv2.sh
+./scripts/run_trace_sharegpt.sh
+```
+
 See `INSTRUMENTATION.md` for:
 
 - Where A/B/C/D instrumentation is implemented
