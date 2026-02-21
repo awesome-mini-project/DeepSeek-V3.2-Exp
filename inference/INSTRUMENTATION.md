@@ -34,7 +34,7 @@ python3 -m pip install git+https://github.com/tile-ai/tilelang
 ```bash
 cd inference
 export EXPERTS=256
-export MP=1              # 按实际 GPU 数设置；需满足 256 % MP == 0
+export MP=8              # 默认建议 8；按实际 GPU 数设置；需满足 256 % MP == 0
 export HF_CKPT_PATH=/path/to/hf_ckpt
 export SAVE_PATH=/path/to/converted_ckpt
 
@@ -61,7 +61,7 @@ python3 sanity_trace_no_torch.py
 ```bash
 cd inference
 export CONFIG=config_671B_v3.2.json
-export MP=1
+export MP=8
 
 torchrun --nproc-per-node "${MP}" generate.py \
   --ckpt-path "${SAVE_PATH}" \

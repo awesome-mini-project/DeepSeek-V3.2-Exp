@@ -8,7 +8,7 @@ set -euo pipefail
 #
 # Optional env:
 # - CONFIG (default: inference/config_671B_v3.2.json)
-# - MP (default: 1)
+# - MP (default: 8)
 # - LIMIT (default: 64)
 # - BATCH_SIZE (default: 1)
 # - KV_BLOCK_SIZE (default: 16)
@@ -17,7 +17,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CKPT_PATH="${CKPT_PATH:?Please set CKPT_PATH}"
 CONFIG="${CONFIG:-${ROOT_DIR}/inference/config_671B_v3.2.json}"
-MP="${MP:-1}"
+MP="${MP:-8}"
 LIMIT="${LIMIT:-64}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 KV_BLOCK_SIZE="${KV_BLOCK_SIZE:-16}"
