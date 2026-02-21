@@ -503,6 +503,8 @@ class Indexer(torch.nn.Module):
         self.k_scale_cache[:bsz, start_pos:end_pos] = k_scale
         weights = self.weights_proj(x.float()) * self.n_heads ** -0.5
         weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale
+        # Debug: ensure weights shape matches fp8_index expectations.
+        weights = weights.squeeze(-1)
         k = self.k_cache[:bsz, :end_pos]
         k_s = self.k_scale_cache[:bsz, :end_pos].squeeze(-1)
 
