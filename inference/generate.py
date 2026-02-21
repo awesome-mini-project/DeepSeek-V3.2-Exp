@@ -3,6 +3,7 @@ import json
 import time
 from argparse import ArgumentParser
 from typing import List, Optional, Sequence
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -11,6 +12,20 @@ from safetensors.torch import load_model
 
 from model import Transformer, ModelArgs
 import trace as ds_trace
+
+
+def _resolve_config_path(p: str) -> str:
+    if not p:
+        return p
+    if os.path.isabs(p) and os.path.exists(p):
+        return p
+    if os.path.exists(p):
+        return p
+    base = Path(__file__).resolve().parent
+    cand = base / p
+    if cand.exists():
+        return str(cand)
+    return p
 
 
 def sample(logits, temperature: float = 1.0):
@@ -135,6 +150,7 @@ def main(
     torch.set_default_dtype(torch.bfloat16)
     torch.set_num_threads(8)
     torch.manual_seed(33377335)
+    config = _resolve_config_path(config)
     with open(config) as f:
         args = ModelArgs(**json.load(f))
     print(args)

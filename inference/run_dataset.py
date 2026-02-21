@@ -2,6 +2,7 @@ import json
 import os
 import time
 from argparse import ArgumentParser
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
@@ -23,6 +24,24 @@ def _init_dist() -> Tuple[int, int, int]:
         dist.init_process_group("nccl")
     torch.cuda.set_device(local_rank)
     return world_size, rank, local_rank
+
+
+def _resolve_config_path(p: str) -> str:
+    """
+    Resolve config path robustly across different working directories.
+    If p is relative and not found, try relative to this file's directory.
+    """
+    if not p:
+        return p
+    if os.path.isabs(p) and os.path.exists(p):
+        return p
+    if os.path.exists(p):
+        return p
+    base = Path(__file__).resolve().parent
+    cand = base / p
+    if cand.exists():
+        return str(cand)
+    return p
 
 
 def _infer_prompt_text(dataset: str, ex: Dict[str, Any]) -> str:
@@ -98,6 +117,7 @@ def main() -> None:
     parser.add_argument("--sharegpt-turn-mode", type=str, default="full", choices=["full", "per_user_turn"])
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
+    args.config = _resolve_config_path(args.config)
 
     world_size, rank, _ = _init_dist()
     if rank != 0:

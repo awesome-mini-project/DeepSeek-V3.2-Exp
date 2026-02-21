@@ -4,6 +4,7 @@ import os
 import time
 from argparse import ArgumentParser
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
@@ -32,6 +33,20 @@ def _init_dist() -> Tuple[int, int, int]:
         dist.init_process_group("nccl")
     torch.cuda.set_device(local_rank)
     return world_size, rank, local_rank
+
+
+def _resolve_config_path(p: str) -> str:
+    if not p:
+        return p
+    if os.path.isabs(p) and os.path.exists(p):
+        return p
+    if os.path.exists(p):
+        return p
+    base = Path(__file__).resolve().parent
+    cand = base / p
+    if cand.exists():
+        return str(cand)
+    return p
 
 
 def _read_burstgpt_csv(path: str, limit: int) -> List[BurstRequest]:
@@ -91,6 +106,7 @@ def main() -> None:
     parser.add_argument("--trace-no-sync-cuda", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
+    args.config = _resolve_config_path(args.config)
 
     world_size, rank, _ = _init_dist()
     if rank != 0:

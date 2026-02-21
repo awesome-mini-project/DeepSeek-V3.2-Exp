@@ -23,6 +23,15 @@ BATCH_SIZE="${BATCH_SIZE:-1}"
 KV_BLOCK_SIZE="${KV_BLOCK_SIZE:-16}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-64}"
 
+# Make CONFIG robust when user provides a relative path.
+if [[ "${CONFIG}" != /* ]]; then
+  if [[ -f "${ROOT_DIR}/${CONFIG}" ]]; then
+    CONFIG="${ROOT_DIR}/${CONFIG}"
+  elif [[ -f "${ROOT_DIR}/inference/${CONFIG}" ]]; then
+    CONFIG="${ROOT_DIR}/inference/${CONFIG}"
+  fi
+fi
+
 OUT_DIR="${ROOT_DIR}/outputs/ruler_$(date +%s)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
