@@ -28,7 +28,8 @@ MAX_NEW_TOKENS_CAP="${MAX_NEW_TOKENS_CAP:-64}"
 OUT_DIR="${ROOT_DIR}/outputs/burstgpt_$(date +%s)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
-CMD=("${PYTHON_BIN}" "${ROOT_DIR}/inference/run_burstgpt.py"
+SCRIPT="${ROOT_DIR}/inference/run_burstgpt.py"
+ARGS=(
   --ckpt-path "${CKPT_PATH}"
   --config "${CONFIG}"
   --burstgpt-csv "${BURSTGPT_CSV}"
@@ -40,9 +41,9 @@ CMD=("${PYTHON_BIN}" "${ROOT_DIR}/inference/run_burstgpt.py"
 )
 
 if [[ "${MP}" -gt 1 ]]; then
-  torchrun --nproc-per-node "${MP}" "${CMD[@]}"
+  torchrun --nproc-per-node "${MP}" "${SCRIPT}" "${ARGS[@]}"
 else
-  "${CMD[@]}"
+  "${PYTHON_BIN}" "${SCRIPT}" "${ARGS[@]}"
 fi
 
 echo "Done. Trace outputs: ${OUT_DIR}"

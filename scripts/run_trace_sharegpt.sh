@@ -29,7 +29,8 @@ SHAREGPT_JSON="${SHAREGPT_JSON:-}"
 SHAREGPT_DATASET="${SHAREGPT_DATASET:-anon8231489123/ShareGPT_Vicuna_unfiltered}"
 TURN_MODE="${TURN_MODE:-full}"
 
-CMD=("${PYTHON_BIN}" "${ROOT_DIR}/inference/run_dataset.py"
+SCRIPT="${ROOT_DIR}/inference/run_dataset.py"
+ARGS=(
   --ckpt-path "${CKPT_PATH}"
   --config "${CONFIG}"
   --dataset sharegpt
@@ -43,15 +44,15 @@ CMD=("${PYTHON_BIN}" "${ROOT_DIR}/inference/run_dataset.py"
 )
 
 if [[ -n "${SHAREGPT_JSON}" ]]; then
-  CMD+=(--sharegpt-json "${SHAREGPT_JSON}")
+  ARGS+=(--sharegpt-json "${SHAREGPT_JSON}")
 else
-  CMD+=(--sharegpt-dataset "${SHAREGPT_DATASET}")
+  ARGS+=(--sharegpt-dataset "${SHAREGPT_DATASET}")
 fi
 
 if [[ "${MP}" -gt 1 ]]; then
-  torchrun --nproc-per-node "${MP}" "${CMD[@]}"
+  torchrun --nproc-per-node "${MP}" "${SCRIPT}" "${ARGS[@]}"
 else
-  "${CMD[@]}"
+  "${PYTHON_BIN}" "${SCRIPT}" "${ARGS[@]}"
 fi
 
 echo "Done. Trace outputs: ${OUT_DIR}"

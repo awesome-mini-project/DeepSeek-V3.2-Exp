@@ -26,7 +26,8 @@ MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-32}"
 OUT_DIR="${ROOT_DIR}/outputs/longbenchv2_$(date +%s)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
-CMD=("${PYTHON_BIN}" "${ROOT_DIR}/inference/run_dataset.py"
+SCRIPT="${ROOT_DIR}/inference/run_dataset.py"
+ARGS=(
   --ckpt-path "${CKPT_PATH}"
   --config "${CONFIG}"
   --dataset longbenchv2
@@ -39,9 +40,9 @@ CMD=("${PYTHON_BIN}" "${ROOT_DIR}/inference/run_dataset.py"
 )
 
 if [[ "${MP}" -gt 1 ]]; then
-  torchrun --nproc-per-node "${MP}" "${CMD[@]}"
+  torchrun --nproc-per-node "${MP}" "${SCRIPT}" "${ARGS[@]}"
 else
-  "${CMD[@]}"
+  "${PYTHON_BIN}" "${SCRIPT}" "${ARGS[@]}"
 fi
 
 echo "Done. Trace outputs: ${OUT_DIR}"
