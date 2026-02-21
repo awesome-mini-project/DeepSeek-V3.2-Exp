@@ -13,6 +13,7 @@ set -euo pipefail
 # - BATCH_SIZE: batch size (default: 1)
 # - KV_BLOCK_SIZE: logical KV block size in tokens (default: 16)
 # - MAX_NEW_TOKENS: decode length cap (default: 64)
+# - RULER_TGZ: which RULER archive to use (default: data_debug.tgz; alternative: data_100_samples.tgz)
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CKPT_PATH="${CKPT_PATH:?Please set CKPT_PATH}"
@@ -22,6 +23,7 @@ LIMIT="${LIMIT:-64}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 KV_BLOCK_SIZE="${KV_BLOCK_SIZE:-16}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-64}"
+RULER_TGZ="${RULER_TGZ:-data_debug.tgz}"
 
 # Force HuggingFace caches to live under the repo (avoid ~/.cache/huggingface).
 DATA_ROOT="${DATAS_DIR:-${DATA_ROOT:-${ROOT_DIR}/data}}"
@@ -50,6 +52,7 @@ ARGS=(
   --config "${CONFIG}"
   --dataset ruler
   --split train
+  --ruler-tgz "${RULER_TGZ}"
   --limit "${LIMIT}"
   --batch-size "${BATCH_SIZE}"
   --kv-block-size "${KV_BLOCK_SIZE}"

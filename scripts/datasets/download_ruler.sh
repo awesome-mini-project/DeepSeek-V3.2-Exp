@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Download RULER dataset via Hugging Face.
+# Download + extract RULER dataset via Hugging Face.
 # Source: allenai/ruler_data (arXiv:2404.06654)
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -16,23 +16,30 @@ export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_HOME}/transformers}"
 mkdir -p "${HF_HUB_CACHE}" "${HF_DATASETS_CACHE}" "${TRANSFORMERS_CACHE}"
 
 OUT_DIR="${DATA_ROOT}/ruler"
+RULER_TGZ="${RULER_TGZ:-data_debug.tgz}"  # or data_100_samples.tgz
 
 mkdir -p "${OUT_DIR}"
-export OUT_DIR
+export OUT_DIR RULER_TGZ
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 "${PYTHON_BIN}" - <<'PY'
 import os
-from datasets import load_dataset
+import tarfile
+from huggingface_hub import hf_hub_download
 
 out_dir = os.environ.get("OUT_DIR")
-ds = load_dataset("allenai/ruler_data", split="train")
-path = os.path.join(out_dir, "ruler_train.jsonl")
-with open(path, "w", encoding="utf-8") as f:
-    for ex in ds:
-        f.write(__import__("json").dumps(ex, ensure_ascii=False) + "\n")
-print("Wrote", path, "rows=", len(ds))
+tgz = os.environ.get("RULER_TGZ", "data_debug.tgz")
+tgz_path = hf_hub_download(repo_id="allenai/ruler_data", filename=tgz, repo_type="dataset")
+extract_dir = os.path.join(out_dir, f"extracted_{tgz.replace('.tgz','')}")
+os.makedirs(extract_dir, exist_ok=True)
+marker = os.path.join(extract_dir, ".extracted.ok")
+if not os.path.exists(marker):
+    with tarfile.open(tgz_path, "r:gz") as tf:
+        tf.extractall(path=extract_dir)
+    with open(marker, "w", encoding="utf-8") as f:
+        f.write("ok\n")
+print("Extracted", tgz, "to", extract_dir)
 PY
 
 echo "Done. Output: ${OUT_DIR}"

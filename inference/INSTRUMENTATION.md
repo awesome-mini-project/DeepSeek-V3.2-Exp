@@ -151,7 +151,10 @@ export BURSTGPT_CSV="data/burstgpt/burstgpt_train_limit2000.csv"
 
 ### RULER
 
-- Runner 直接从 HF 拉取：`allenai/ruler_data`
+- Runner 从 HF 拉取：`allenai/ruler_data`
+- 注意：该 repo 提供的是 **`data_debug.tgz` / `data_100_samples.tgz` 压缩包**，不是可直接 `load_dataset("allenai/ruler_data")` 的 json/parquet 格式。\n
+  - 本项目已在 `run_dataset.py` 内部自动处理：下载 tgz → 解压到 `data/ruler/` → 再用 `load_dataset("json", ...)` 读取。\n
+  - 可通过 `RULER_TGZ=data_100_samples.tgz ./scripts/run_trace_ruler.sh` 切换更大的样本包。
 - 或使用脚本导出 JSONL：
 
 ```bash

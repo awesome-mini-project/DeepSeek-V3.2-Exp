@@ -3,11 +3,13 @@ import os
 import time
 from argparse import ArgumentParser
 from pathlib import Path
+import tarfile
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
 import torch.distributed as dist
 from datasets import load_dataset
+from huggingface_hub import hf_hub_download
 from transformers import AutoTokenizer
 from safetensors.torch import load_model
 
@@ -42,6 +44,62 @@ def _resolve_config_path(p: str) -> str:
     if cand.exists():
         return str(cand)
     return p
+
+
+def _data_root() -> Path:
+    # Prefer explicit env overrides; else infer from HF_HOME when scripts set it.
+    for k in ("DATAS_DIR", "DATA_ROOT"):
+        v = os.getenv(k)
+        if v:
+            return Path(v).resolve()
+    hf_home = os.getenv("HF_HOME")
+    if hf_home:
+        return Path(hf_home).resolve().parent
+    return (Path.cwd() / "data").resolve()
+
+
+def _prepare_ruler_dataset(split: str, tgz_name: str) -> List[str]:
+    """
+    RULER HF dataset (allenai/ruler_data) ships as tgz archives, not directly loadable.
+    We download + extract under data/ruler/ and return json/jsonl file paths.
+    """
+    data_root = _data_root()
+    out_dir = data_root / "ruler"
+    extract_dir = out_dir / f"extracted_{tgz_name.replace('.tgz','')}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    extract_dir.mkdir(parents=True, exist_ok=True)
+
+    # Download to HF hub cache (which scripts redirect under data/huggingface/hub).
+    tgz_path = hf_hub_download(
+        repo_id="allenai/ruler_data",
+        filename=tgz_name,
+        repo_type="dataset",
+    )
+
+    # Extract once (best-effort marker file).
+    marker = extract_dir / ".extracted.ok"
+    if not marker.exists():
+        # Clean partial extraction (best effort) by re-extracting over directory.
+        with tarfile.open(tgz_path, "r:gz") as tf:
+            tf.extractall(path=extract_dir)
+        marker.write_text("ok\n", encoding="utf-8")
+
+    # Collect candidate json/jsonl files.
+    cand: List[str] = []
+    for root, _, files in os.walk(extract_dir):
+        for fn in files:
+            low = fn.lower()
+            if low.endswith(".jsonl") or low.endswith(".json"):
+                cand.append(str(Path(root) / fn))
+
+    # Prefer files matching split keyword if present.
+    split = (split or "").lower()
+    if split:
+        split_hits = [p for p in cand if split in Path(p).name.lower()]
+        if split_hits:
+            cand = split_hits
+
+    return sorted(cand)
 
 
 def _infer_prompt_text(dataset: str, ex: Dict[str, Any]) -> str:
@@ -115,6 +173,7 @@ def main() -> None:
     parser.add_argument("--sharegpt-json", type=str, default="")
     parser.add_argument("--sharegpt-dataset", type=str, default="anon8231489123/ShareGPT_Vicuna_unfiltered")
     parser.add_argument("--sharegpt-turn-mode", type=str, default="full", choices=["full", "per_user_turn"])
+    parser.add_argument("--ruler-tgz", type=str, default="data_debug.tgz", choices=["data_debug.tgz", "data_100_samples.tgz"])
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
     args.config = _resolve_config_path(args.config)
@@ -155,7 +214,21 @@ def main() -> None:
     prefix_analyzer = ds_trace.PrefixCacheAnalyzer(prefix_cache_key_tokens=args.trace_prefix_key_tokens)
 
     if args.dataset == "ruler":
-        ds = load_dataset("allenai/ruler_data", split=args.split)
+        # allenai/ruler_data ships tgz archives; extract under repo data/ and load json/jsonl.
+        if world_size > 1 and dist.is_initialized():
+            dist.barrier()
+        if rank == 0:
+            files = _prepare_ruler_dataset(args.split, args.ruler_tgz)
+        else:
+            files = []
+        if world_size > 1 and dist.is_initialized():
+            obj_list = [files]
+            dist.broadcast_object_list(obj_list, src=0)
+            files = obj_list[0]
+            dist.barrier()
+        if not files:
+            raise RuntimeError("RULER dataset files not found after extraction. Try --ruler-tgz data_100_samples.tgz.")
+        ds = load_dataset("json", data_files=files, split="train")
     elif args.dataset == "longbenchv2":
         # HF LongBench v2 is commonly published as zai-org/LongBench-v2 with train split only.
         ds = load_dataset("zai-org/LongBench-v2", split="train")
