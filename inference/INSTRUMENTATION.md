@@ -134,6 +134,20 @@ export BURSTGPT_CSV="data/burstgpt/burstgpt_train_limit2000.csv"
 
 ## 数据集下载 / 准备
 
+### 下载发生在什么时候？下载到哪里？
+
+本项目有两种方式获取数据集：
+
+- **默认方式（推荐，最省事）**：直接跑 `./scripts/run_trace_*.sh` 或 `inference/run_dataset.py`  
+  - 这些 runner 内部会调用 HuggingFace `datasets.load_dataset(...)`。\n
+  - **首次运行**时会自动从 HuggingFace 下载数据集到本机缓存（HF cache），之后再跑会直接复用缓存，通常不会重复下载。\n
+  - 缓存位置通常在 `~/.cache/huggingface/`（也可能受 `HF_HOME` / `HF_DATASETS_CACHE` 等环境变量影响）。
+
+- **可选方式（离线/可控）**：先运行 `./scripts/datasets/download_*.sh`  
+  - 这些脚本会把数据集**导出到仓库的 `data/` 目录**（例如 `data/ruler/*.jsonl`）。\n
+  - 适合你要做离线实验、或想把输入数据固定成单个 JSONL/CSV 文件时使用。\n
+  - 其中 **BurstGPT** 强烈建议走这种方式先导出一个小 CSV（否则在线拉全量会很慢也很大）。
+
 ### RULER
 
 - Runner 直接从 HF 拉取：`allenai/ruler_data`
