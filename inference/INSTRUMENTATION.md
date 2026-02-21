@@ -35,8 +35,8 @@ python3 -m pip install git+https://github.com/tile-ai/tilelang
 cd inference
 export EXPERTS=256
 export MP=8              # 默认建议 8；按实际 GPU 数设置；需满足 256 % MP == 0
-export HF_CKPT_PATH=/path/to/hf_ckpt
-export SAVE_PATH=/path/to/converted_ckpt
+export HF_CKPT_PATH=/data/models/deepseek-v3.2-exp
+export SAVE_PATH=/data/models/deepseek-v3.2-exp-s
 
 python3 convert.py \
   --hf-ckpt-path "${HF_CKPT_PATH}" \
