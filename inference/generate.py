@@ -1,7 +1,8 @@
 import os
 import json
+import time
 from argparse import ArgumentParser
-from typing import List
+from typing import List, Optional, Sequence
 
 import torch
 import torch.distributed as dist
@@ -9,6 +10,7 @@ from transformers import AutoTokenizer
 from safetensors.torch import load_model
 
 from model import Transformer, ModelArgs
+import trace as ds_trace
 
 
 def sample(logits, temperature: float = 1.0):
@@ -33,7 +35,9 @@ def generate(
     prompt_tokens: List[List[int]],
     max_new_tokens: int,
     eos_id: int,
-    temperature: float = 1.0
+    temperature: float = 1.0,
+    request_ids: Optional[Sequence[int]] = None,
+    prefix_infos: Optional[Sequence[ds_trace.RequestPrefixInfo]] = None,
 ) -> List[List[int]]:
     """
     Generates new tokens based on the given prompt tokens using the specified model.
@@ -57,8 +61,23 @@ def generate(
     prev_pos = 0
     finished = torch.tensor([False] * len(prompt_tokens), device="cuda")
     prompt_mask = tokens != -1
+    tracer = ds_trace.get_tracer()
+    if tracer.enabled:
+        if request_ids is None:
+            request_ids = list(range(len(prompt_tokens)))
+        tracer.set_batch(request_ids=request_ids, prefix_infos=prefix_infos)
     for cur_pos in range(min(prompt_lens), total_len):
+        if tracer.enabled:
+            tracer.set_step_timing(step_idx=prev_pos, step_wall_us=None)
+            if tracer.cfg.sync_cuda_for_timing:
+                torch.cuda.synchronize()
+            t0 = time.perf_counter_ns()
         logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+        if tracer.enabled:
+            if tracer.cfg.sync_cuda_for_timing:
+                torch.cuda.synchronize()
+            t1 = time.perf_counter_ns()
+            tracer.set_step_timing(step_idx=prev_pos, step_wall_us=(t1 - t0) // 1000)
         if temperature > 0:
             next_token = sample(logits, temperature)
         else:
@@ -85,6 +104,13 @@ def main(
     interactive: bool = True,
     max_new_tokens: int = 100,
     temperature: float = 1.0,
+    trace_enable: bool = False,
+    trace_out: str = "",
+    kv_block_size: int = 16,
+    trace_store_scores: bool = False,
+    trace_sample_rate: float = 1.0,
+    trace_prefix_key_tokens: int = 256,
+    trace_sync_cuda: bool = True,
 ) -> None:
     """
     Main function to load the model and perform interactive or batch text generation.
@@ -114,6 +140,26 @@ def main(
     print(args)
     with torch.device("cuda"):
         model = Transformer(args)
+    if trace_enable or trace_out:
+        if not trace_out:
+            trace_out = str(os.path.join("outputs", f"trace_{int(time.time() * 1000)}"))
+        cfg = ds_trace.TraceConfig(
+            enabled=True,
+            out_dir=trace_out,
+            kv_block_size_tokens=int(kv_block_size),
+            store_scores_topk=bool(trace_store_scores),
+            store_selected_token_pos=True,
+            sample_rate=float(trace_sample_rate),
+            rank0_only=True,
+            sync_cuda_for_timing=bool(trace_sync_cuda),
+            prefix_cache_key_tokens=int(trace_prefix_key_tokens),
+        )
+        tracer = ds_trace.init_tracer(cfg)
+        tracer.set_run_meta(run_name=os.path.basename(trace_out.rstrip("/")), dataset="interactive" if interactive else "file")
+        # Expose bytes/token for logical KV fetch estimation.
+        bytes_per_token = int((model.layers[0].attn.kv_cache.size(-1) * model.layers[0].attn.kv_cache.element_size()) +
+                              (model.layers[0].attn.pe_cache.size(-1) * model.layers[0].attn.pe_cache.element_size()))
+        os.environ["DS_TRACE_KV_BYTES_PER_TOKEN"] = str(bytes_per_token)
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
     print("load model")
     load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
@@ -139,7 +185,7 @@ def main(
                 continue
             messages.append({"role": "user", "content": prompt})
             prompt_tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
-            completion_tokens = generate(model, [prompt_tokens], max_new_tokens, tokenizer.eos_token_id, temperature)
+            completion_tokens = generate(model, [prompt_tokens], max_new_tokens, tokenizer.eos_token_id, temperature, request_ids=[0])
             completion = tokenizer.decode(completion_tokens[0], skip_special_tokens=True)
             print(completion)
             messages.append({"role": "assistant", "content": completion})
@@ -148,7 +194,7 @@ def main(
             prompts = f.read().split("\n\n")
         assert len(prompts) <= args.max_batch_size, f"Number of prompts exceeds maximum batch size ({args.max_batch_size})"
         prompt_tokens = [tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True) for prompt in prompts]
-        completion_tokens = generate(model, prompt_tokens, max_new_tokens, tokenizer.eos_token_id, temperature)
+        completion_tokens = generate(model, prompt_tokens, max_new_tokens, tokenizer.eos_token_id, temperature, request_ids=list(range(len(prompt_tokens))))
         completions = tokenizer.batch_decode(completion_tokens, skip_special_tokens=True)
         for prompt, completion in zip(prompts, completions):
             print("Prompt:", prompt)
@@ -157,6 +203,9 @@ def main(
 
     if world_size > 1:
         dist.destroy_process_group()
+    tracer = ds_trace.get_tracer()
+    if tracer.enabled:
+        tracer.close()
 
 
 if __name__ == "__main__":
@@ -181,6 +230,27 @@ if __name__ == "__main__":
     parser.add_argument("--interactive", action="store_true")
     parser.add_argument("--max-new-tokens", type=int, default=200)
     parser.add_argument("--temperature", type=float, default=0.6)
+    parser.add_argument("--trace-enable", action="store_true")
+    parser.add_argument("--trace-out", type=str, default="")
+    parser.add_argument("--kv-block-size", type=int, default=16)
+    parser.add_argument("--trace-store-scores", action="store_true")
+    parser.add_argument("--trace-sample-rate", type=float, default=1.0)
+    parser.add_argument("--trace-prefix-key-tokens", type=int, default=256)
+    parser.add_argument("--trace-no-sync-cuda", action="store_true")
     args = parser.parse_args()
     assert args.input_file or args.interactive, "Either input-file or interactive mode must be specified"
-    main(args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens, args.temperature)
+    main(
+        args.ckpt_path,
+        args.config,
+        args.input_file,
+        args.interactive,
+        args.max_new_tokens,
+        args.temperature,
+        args.trace_enable,
+        args.trace_out,
+        args.kv_block_size,
+        args.trace_store_scores,
+        args.trace_sample_rate,
+        args.trace_prefix_key_tokens,
+        not args.trace_no_sync_cuda,
+    )

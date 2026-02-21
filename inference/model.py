@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 
 from kernel import act_quant, fp8_gemm, fp8_index
+import trace as ds_trace
 
 
 world_size = 1
@@ -425,11 +426,35 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor, interleaved: bool
     return y.to(dtype)
 
 
+def _hadamard_transform_pytorch(x: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
+    """Pure PyTorch Walsh-Hadamard transform (no CUDA extension). Last dim must be power of 2."""
+    n = x.size(-1)
+    if n & (n - 1) != 0:
+        raise ValueError(f"hadamard_transform requires last dim to be power of 2, got {n}")
+    out = x.clone()
+    bit = n
+    for _ in range(int(math.log2(n))):
+        bit >>= 1
+        out = out.view(*out.shape[:-1], -1, 2, bit)
+        a, b = out[..., 0, :], out[..., 1, :]
+        out = torch.stack([a + b, a - b], dim=-2).flatten(-2)
+    return out * scale
+
+
 def rotate_activation(x: torch.Tensor) -> torch.Tensor:
-    assert x.dtype == torch.bfloat16
-    from fast_hadamard_transform import hadamard_transform
+    """
+    Apply (normalized) Hadamard transform on the last dimension of x.
+    Used in Indexer before act_quant to mix channels (e.g. for QuaRot/SpinQuant-style
+    quantization). Equivalent to: x @ H.T * (hidden_size ** -0.5), where H is the
+    Hadamard matrix. Prefer fast_hadamard_transform (CUDA) when available.
+    """
     hidden_size = x.size(-1)
-    return hadamard_transform(x, scale=hidden_size ** -0.5)
+    scale = hidden_size**-0.5
+    try:
+        from fast_hadamard_transform import hadamard_transform
+        return hadamard_transform(x, scale=scale)
+    except ImportError:
+        return _hadamard_transform_pytorch(x, scale=scale)
 
 
 class Indexer(torch.nn.Module):
@@ -452,6 +477,7 @@ class Indexer(torch.nn.Module):
 
         self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.head_dim, dtype=torch.float8_e4m3fn), persistent=False)
         self.register_buffer("k_scale_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.head_dim // block_size, dtype=torch.float32), persistent=False)
+        self._trace_layer_id: int = -1
 
 
     def forward(self, x: torch.Tensor, qr: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
@@ -477,13 +503,36 @@ class Indexer(torch.nn.Module):
         self.k_scale_cache[:bsz, start_pos:end_pos] = k_scale
         weights = self.weights_proj(x.float()) * self.n_heads ** -0.5
         weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale
-        index_score = fp8_index(q_fp8.contiguous(), weights, self.k_cache[:bsz, :end_pos].contiguous(), self.k_scale_cache[:bsz, :end_pos].contiguous())
+        k = self.k_cache[:bsz, :end_pos]
+        k_s = self.k_scale_cache[:bsz, :end_pos].squeeze(-1)
+
+        k = k.reshape(bsz * end_pos, self.head_dim).contiguous().reshape(
+            bsz, end_pos, self.head_dim
+        )
+        k_s = k_s.reshape(bsz * end_pos).contiguous().reshape(bsz, end_pos)
+
+        index_score = fp8_index(q_fp8.contiguous(), weights.contiguous(), k, k_s)
         if mask is not None:
             index_score += mask
-        topk_indices = index_score.topk(min(self.index_topk, end_pos), dim=-1)[1]
+        k = min(self.index_topk, end_pos)
+        tracer = ds_trace.get_tracer()
+        trace_decode_only = (mask is None and seqlen == 1)
+        if tracer.enabled and trace_decode_only:
+            topk_values, topk_indices = index_score.topk(k, dim=-1)
+        else:
+            topk_values = None
+            topk_indices = index_score.topk(k, dim=-1)[1]
         topk_indices_ = topk_indices.clone()
         dist.broadcast(topk_indices_, src=0)
         assert torch.all(topk_indices == topk_indices_), f"{topk_indices=} {topk_indices_=}"
+        if tracer.enabled and trace_decode_only:
+            tracer.record_dsa_topk(
+                layer_id=int(self._trace_layer_id),
+                start_pos=int(start_pos),
+                end_pos=int(end_pos),
+                topk_indices=topk_indices,
+                topk_scores=topk_values,
+            )
         return topk_indices
 
 
@@ -511,8 +560,9 @@ class MLA(nn.Module):
         v_head_dim (int): Dimensionality of value projections.
         softmax_scale (float): Scaling factor for softmax in attention computation.
     """
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, layer_id: int = -1):
         super().__init__()
+        self.layer_id = int(layer_id)
         self.dim = args.dim
         self.n_heads = args.n_heads
         self.n_local_heads = args.n_heads // world_size
@@ -537,6 +587,7 @@ class MLA(nn.Module):
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
         self.indexer = Indexer(args)
+        self.indexer._trace_layer_id = self.layer_id
 
         self.register_buffer("kv_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.kv_lora_rank), persistent=False)
         self.register_buffer("pe_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.qk_rope_head_dim), persistent=False)
@@ -823,7 +874,7 @@ class Block(nn.Module):
             args (ModelArgs): Model arguments containing block parameters.
         """
         super().__init__()
-        self.attn = MLA(args)
+        self.attn = MLA(args, layer_id=layer_id)
         self.ffn = MLP(args.dim, args.inter_dim) if layer_id < args.n_dense_layers else MoE(args)
         self.attn_norm = RMSNorm(args.dim)
         self.ffn_norm = RMSNorm(args.dim)
