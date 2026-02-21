@@ -5,7 +5,17 @@ set -euo pipefail
 # Source: zai-org/LongBench-v2 (arXiv:2412.15204)
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-OUT_DIR="${ROOT_DIR}/data/longbenchv2"
+DATA_ROOT="${DATAS_DIR:-${DATA_ROOT:-${ROOT_DIR}/data}}"
+
+# Force HuggingFace caches to live under the repo (avoid ~/.cache/huggingface).
+HF_HOME="${HF_HOME:-${DATA_ROOT}/huggingface}"
+export HF_HOME
+export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HF_HOME}/datasets}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_HOME}/transformers}"
+mkdir -p "${HF_HUB_CACHE}" "${HF_DATASETS_CACHE}" "${TRANSFORMERS_CACHE}"
+
+OUT_DIR="${DATA_ROOT}/longbenchv2"
 
 mkdir -p "${OUT_DIR}"
 export OUT_DIR

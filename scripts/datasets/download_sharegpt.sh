@@ -5,7 +5,17 @@ set -euo pipefail
 # Default: anon8231489123/ShareGPT_Vicuna_unfiltered
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-OUT_DIR="${ROOT_DIR}/data/sharegpt"
+DATA_ROOT="${DATAS_DIR:-${DATA_ROOT:-${ROOT_DIR}/data}}"
+
+# Force HuggingFace caches to live under the repo (avoid ~/.cache/huggingface).
+HF_HOME="${HF_HOME:-${DATA_ROOT}/huggingface}"
+export HF_HOME
+export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HF_HOME}/datasets}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_HOME}/transformers}"
+mkdir -p "${HF_HUB_CACHE}" "${HF_DATASETS_CACHE}" "${TRANSFORMERS_CACHE}"
+
+OUT_DIR="${DATA_ROOT}/sharegpt"
 DATASET_NAME="${DATASET_NAME:-anon8231489123/ShareGPT_Vicuna_unfiltered}"
 SPLIT="${SPLIT:-train}"
 

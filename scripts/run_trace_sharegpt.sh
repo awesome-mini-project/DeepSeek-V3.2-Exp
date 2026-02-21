@@ -23,6 +23,15 @@ BATCH_SIZE="${BATCH_SIZE:-1}"
 KV_BLOCK_SIZE="${KV_BLOCK_SIZE:-16}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-64}"
 
+# Force HuggingFace caches to live under the repo (avoid ~/.cache/huggingface).
+DATA_ROOT="${DATAS_DIR:-${DATA_ROOT:-${ROOT_DIR}/data}}"
+HF_HOME="${HF_HOME:-${DATA_ROOT}/huggingface}"
+export HF_HOME
+export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HF_HOME}/datasets}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_HOME}/transformers}"
+mkdir -p "${HF_HUB_CACHE}" "${HF_DATASETS_CACHE}" "${TRANSFORMERS_CACHE}"
+
 # Make CONFIG robust when user provides a relative path.
 if [[ "${CONFIG}" != /* ]]; then
   if [[ -f "${ROOT_DIR}/${CONFIG}" ]]; then

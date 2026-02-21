@@ -9,7 +9,17 @@ set -euo pipefail
 # - The exported CSV keeps the common columns used by `inference/run_burstgpt.py`.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-OUT_DIR="${ROOT_DIR}/data/burstgpt"
+DATA_ROOT="${DATAS_DIR:-${DATA_ROOT:-${ROOT_DIR}/data}}"
+
+# Force HuggingFace caches to live under the repo (avoid ~/.cache/huggingface).
+HF_HOME="${HF_HOME:-${DATA_ROOT}/huggingface}"
+export HF_HOME
+export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HF_HOME}/datasets}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_HOME}/transformers}"
+mkdir -p "${HF_HUB_CACHE}" "${HF_DATASETS_CACHE}" "${TRANSFORMERS_CACHE}"
+
+OUT_DIR="${DATA_ROOT}/burstgpt"
 DATASET_NAME="${DATASET_NAME:-lzzmm/BurstGPT}"
 SPLIT="${SPLIT:-train}"
 LIMIT="${LIMIT:-2000}"
