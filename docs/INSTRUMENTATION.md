@@ -120,6 +120,8 @@ KV cache 显存开销（bsz=1）：
 | `block_size_tokens` | 逻辑 block 大小（由 `--kv-block-size` 控制，默认 16） |
 | `selected_block_ids` | 去重后的 block ID 列表 |
 | `unique_blocks` | `\|B_t\|`（去重 block 数） |
+| `total_blocks_in_use` | 当前序列实际占用的总 block 数（= `ceil(end_pos / block_size)`） |
+| `touched_block_ratio` | **DSA 选中的 block 占当前已用 block 的比例**（= `unique_blocks / total_blocks_in_use`） |
 | `tokens_per_touched_block` | 每个被触及 block 里用了多少 token 的统计：`{mean, p50, p95}` |
 
 ### 3.3 插桩点 C：KV 取数与搬运代价
@@ -133,8 +135,8 @@ KV cache 显存开销（bsz=1）：
 |---|---|
 | `kv_fetch.hbm.hit_blocks` | HBM 命中的 block 列表（= `selected_block_ids`） |
 | `kv_fetch.hbm.bytes_read` | 估算的读取字节数（按 block 数 × bytes_per_token × block_size） |
-| `kv_fetch.hbm.read_ops` | 读操作次数（默认 1） |
-| `kv_fetch.hbm.latency_us` | step wall-time（微秒），由 `generate.py` 用 `cuda.synchronize()` + perf_counter 测量 |
+| `kv_fetch.hbm.read_ops` | 读操作次数（当前硬编码 1；占位符，接入外部 KV 后按实际填入） |
+| `kv_fetch.hbm.latency_us` | **整个 step（61 层）的 wall-time**（微秒），不是单层延迟；同一 step 的所有层记录的值相同 |
 | `kv_fetch.hbm.batch_size` | 一次 batch_get 覆盖的 block 数 |
 | `kv_fetch.local_pool.*` | 预留占位（全 0） |
 | `kv_fetch.remote_pool.*` | 预留占位（全 0） |
@@ -143,15 +145,25 @@ KV cache 显存开销（bsz=1）：
 
 - **位置**：与 A/B/C 同一记录（prefix 信息由 dataset runner 在每个 request 上生成）
 - **当前实现**：**复用关系分析**（基于 prompt 前 N token 的 hash），不做真实 KV 复用
+- **工作原理**：
+
+  1. runner tokenize 每条 prompt 时，用前 256 个 token 算一个 hash（`prefix_key`）
+  2. 如果之前有 request 算出过**相同的 hash**，说明两个 request 共享前缀 → `prefix_cache_hit = true`
+  3. `prefix_cached_blocks` = 前缀长度覆盖的 block 数（例如 256 tokens / 16 tokens/block = 16 blocks，即 block 0~15）
+  4. 在每个 decode step 的 trace 里，计算 **DSA 选中的 block 有多少落在这些前缀 block 里**
+
+  这个统计回答的问题是：**"DSA 是否频繁触达共享前缀区域的 KV？"**
+  如果 `intersection_ratio` 高，说明 prefix 热块值得放在近端/做多副本。
+
 - **记录字段**：
 
 | 字段 | 说明 |
 |---|---|
-| `prefix.prefix_cache_hit` | 该 request 的前缀是否已被之前的 request 见过 |
-| `prefix.prefix_cached_blocks` | 可复用前缀覆盖的 block 数 |
-| `prefix.prefix_key` | 前缀 hash |
-| `prefix.intersection_ratio` | `\|touched_blocks ∩ prefix_blocks\| / \|touched_blocks\|` |
-| `prefix.intersection_blocks` | 交集 block 列表 |
+| `prefix.prefix_cache_hit` | 该 request 的前缀 hash 是否已被之前的 request 见过（`true` = 共享前缀） |
+| `prefix.prefix_cached_blocks` | 共享前缀覆盖的 block 数（例如 16 = 前 256 tokens 占 16 个 block） |
+| `prefix.prefix_key` | 前缀 hash（SHA1） |
+| `prefix.intersection_ratio` | DSA 选中的 block 中有多少比例落在前缀区域 = `\|选中 ∩ 前缀\| / \|选中\|` |
+| `prefix.intersection_blocks` | 交集 block ID 列表（哪些前缀 block 被 DSA 选中了） |
 
 ---
 
@@ -508,41 +520,65 @@ TEMPERATURE=0 ./scripts/run_trace_ruler.sh
 （unique_blocks、offset、tokens_per_block 等统计特性），这些在多次运行间是**稳定**的。
 temperature 带来的随机性不影响分布的趋势和结论。
 
-### 9.3 `--limit 64` 是否太少？
+### 9.3 `--limit` 和 `--max-new-tokens` 到底控制什么？
 
-**对初步分析足够。** 算一笔账：
+这两个参数容易混淆，下面用具体例子说清楚：
 
-- 64 条样本 × 64 decode steps × 61 layers = **~250K 条 trace 记录**
-- 每条记录包含 `selected_token_pos[2048]`、`selected_block_ids`、offset 统计等
-- 这已经足够做 unique_blocks / tokens_per_block / offset 的分布统计
+**`--limit N`**：从数据集里**取 N 条样本**（不是 N 个 token）。
 
-如果要更大规模统计（例如画 CDF 图、跨任务类型对比），可以调大：
+- RULER `--limit 64`：取 64 条 RULER 任务（每条含一段上下文 + 一个问题）
+- ShareGPT `--limit 64`：取 64 段对话
 
-```bash
-LIMIT=256 MAX_NEW_TOKENS=128 ./scripts/run_trace_ruler.sh
-```
+**`--max-new-tokens M`**：每条样本最多**生成 M 个新 token**（decode 步数上限）。
+
+- `--max-new-tokens 64`：模型最多生成 64 个 token
+- **但模型可以提前停止**：`generate()` 里有 EOS 检测（如果模型输出了 `eos_token`，这条 request 的 decode 就结束）
+- 所以 `max-new-tokens=64` 的含义是"**最多 64 步，遇 EOS 提前结束**"
+
+**它们影响的是 trace 的数量**：
+
+- trace 只在 decode 阶段产生（每 step × 每层 × 每 request）
+- 64 条样本 × 最多 64 decode steps × 61 层 = **最多 ~250K 条 trace 记录**
+- 实际通常更少（因为很多 request 在 EOS 前就结束了）
 
 ### 9.4 `--max-prompt-tokens 16384` 是否太短？
 
 **这是当前 demo 的安全上限**（受 prefill dense O(S^2) 限制）。
 对于 trace 采集来说，16K 的 prompt + 64 的 decode 已经能展示 DSA 的"非局部选择"行为——
-因为 DSA 是在 decode 阶段对**全部已有 token**（最多 16K+64）做 top-2048 选择。
+因为 DSA 是在 decode 阶段对**全部已有 token**（最多 16K+64）做 top-2048 选择，
+只需要从 ~16K token 里选 2048 个，`touched_block_ratio` ≈ 2048/16K ≈ 12.5%，已经有足够的稀疏性可分析。
 
 如需更长 prompt 的 trace，需切换到 vLLM/SGLang（它们的 DSA prefill 是真正的 O(S x k) 稀疏）。
 
-### 9.5 ShareGPT 多轮对话不需要全跑完？
+### 9.5 ShareGPT 多轮对话能自然结束吗？
 
-**不需要。** 两种模式各有用途：
+**可以。** `generate()` 有 EOS 检测：
 
-- `--sharegpt-turn-mode full`：整段对话作为一个 request。适合看"长对话历史下 DSA 选了哪些 token"
-- `--sharegpt-turn-mode per_user_turn`：每个 user turn 作为独立 request。适合看"prefix cache 复用率"
+```python
+finished |= torch.logical_and(~prompt_mask[:, cur_pos], next_token == eos_id)
+if finished.all():
+    break
+```
 
-对于系统论文的分析，你主要关心：
-1. DSA 的 token/block 访问分布 → `full` 模式即可
-2. prefix 共享前缀的复用率 → `per_user_turn` 模式更有价值
+即：如果模型生成了 `eos_token`，该 request 标记为完成。当所有 request 都完成时 `break`。
+所以 **对话会在 EOS 时自然结束**，`--max-new-tokens` 只是一个保底上限防止无限生成。
 
-64 条对话在 `per_user_turn` 模式下会展开成 ~200 个 request，每个 request 的 decode 阶段都会产出 trace。
-这对于回答"DSA 是否频繁触达共享前缀块"已经足够。
+如果你想让对话尽量自然结束，把 `MAX_NEW_TOKENS` 调大一些（比如 512 或 1024）：
+
+```bash
+MAX_NEW_TOKENS=512 ./scripts/run_trace_sharegpt.sh
+```
+
+代价是 decode 步数更多 → trace 更大 → 但能看到更完整的生成轨迹。
+
+**两种模式**：
+
+- `--sharegpt-turn-mode full`：整段对话作为一个 request → 模型在整段历史上做一次生成，自然结束
+- `--sharegpt-turn-mode per_user_turn`：每个 user turn 作为独立 request → 每轮各自生成并自然结束
+
+对系统论文分析来说：
+- DSA token/block 访问分布 → `full` 模式即可
+- prefix 共享前缀的复用率 → `per_user_turn` 模式更有价值（同一对话的多轮 request 共享前缀）
 
 ### 9.6 `--batch-size` 与 `max_batch_size` 的关系
 

@@ -258,6 +258,7 @@ class Tracer:
         self._unique_blocks = _DistributionSummary()
         self._tokens_per_block = _DistributionSummary()
         self._offsets = _DistributionSummary()
+        self._touched_ratios: List[float] = []
         self._intersection_ratio = []  # float values
         self._prefix_hot_blocks: Dict[int, Dict[int, int]] = {}  # request_id -> {block_id: count}
         self._pending_by_step: Dict[int, List[Dict[str, Any]]] = {}
@@ -347,6 +348,8 @@ class Tracer:
             block_size = int(self.cfg.kv_block_size_tokens)
             block_ids = [int(p // block_size) for p in selected_unique]
             unique_block_ids = sorted(set(block_ids))
+            total_blocks_in_use = (end_pos + block_size - 1) // block_size
+            touched_ratio = (len(unique_block_ids) / total_blocks_in_use) if total_blocks_in_use > 0 else 0.0
 
             per_block_counts: Dict[int, int] = {}
             for bid in block_ids:
@@ -403,6 +406,8 @@ class Tracer:
                 "block_size_tokens": block_size,
                 "selected_block_ids": unique_block_ids,
                 "unique_blocks": int(len(unique_block_ids)),
+                "total_blocks_in_use": int(total_blocks_in_use),
+                "touched_block_ratio": round(float(touched_ratio), 4),
                 "tokens_per_touched_block": {"mean": tpb_mean, "p50": tpb_p50, "p95": tpb_p95},
                 "kv_fetch": {
                     "hbm": {
@@ -442,6 +447,7 @@ class Tracer:
             else:
                 self.writer.write(rec)
             self._unique_blocks.add(len(unique_block_ids))
+            self._touched_ratios.append(float(touched_ratio))
             for c in tpb:
                 self._tokens_per_block.add(c)
             for off in offsets:
@@ -464,6 +470,17 @@ class Tracer:
             items = sorted(counter.items(), key=lambda kv: kv[1], reverse=True)[:20]
             hot_blocks[str(req_id)] = [{"block_id": int(b), "touch_count": int(c)} for b, c in items]
 
+        tr = self._touched_ratios
+        tr_sorted = sorted(tr) if tr else []
+        tr_sum = {
+            "count": len(tr_sorted),
+            "min": round(float(tr_sorted[0]), 4) if tr_sorted else 0.0,
+            "p50": round(float(_quantile([int(x * 1_000_000) for x in tr_sorted], 0.5) / 1_000_000.0), 4) if tr_sorted else 0.0,
+            "p95": round(float(_quantile([int(x * 1_000_000) for x in tr_sorted], 0.95) / 1_000_000.0), 4) if tr_sorted else 0.0,
+            "max": round(float(tr_sorted[-1]), 4) if tr_sorted else 0.0,
+            "mean": round(float(sum(tr_sorted) / len(tr_sorted)), 4) if tr_sorted else 0.0,
+        }
+
         return {
             "run_name": self.ctx.run_name,
             "dataset": self.ctx.dataset,
@@ -477,6 +494,7 @@ class Tracer:
                 "prefix_cache_key_tokens": self.cfg.prefix_cache_key_tokens,
             },
             "unique_blocks": self._unique_blocks.summary(),
+            "touched_block_ratio": tr_sum,
             "tokens_per_touched_block": self._tokens_per_block.summary(),
             "offsets": self._offsets.summary(),
             "prefix_intersection_ratio": inter_sum,
