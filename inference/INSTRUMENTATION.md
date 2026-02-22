@@ -27,20 +27,27 @@
 
 ### 2.2 本推理 demo 的实际上限
 
-本 demo 的 `ModelArgs.max_seq_len` 默认是 `4096 * 4 = 16,384`，而 `config_671B_v3.2.json` **没有覆盖这个字段**，因此：
+`ModelArgs.max_seq_len` 的 **dataclass 默认值**是 `4096 * 4 = 16,384`。
+`config_671B_v3.2.json` 现已显式设置 `"max_seq_len": 163840`（与官方 `max_position_embeddings` 对齐）。
 
-- 本 demo 实际能跑的最大序列长度约 **16K tokens**
-- KV cache / indexer cache 都是按 `max_seq_len` 预分配的固定张量
-- 超过此长度的 prompt 会被 runner 跳过（不会崩溃，但不会产出 trace）
+KV cache / indexer cache 都是按 `max_seq_len` **预分配**的固定张量，显存开销估算：
 
-### 2.3 对数据集的影响
+| max_seq_len | 8 batch x 61 layers KV cache |
+|---|---|
+| 16,384 | ~10 GB |
+| 65,536 | ~39 GB |
+| 131,072 | ~78 GB |
+| 163,840 (当前配置) | ~97 GB |
 
-- **RULER**（debug 包 ~4K tokens）：绝大部分样本能跑进去，**推荐首选**
-- **ShareGPT**（对话通常 < 4K tokens）：大部分样本可跑，**推荐**
-- **LongBench v2**（上下文可达 272K tokens）：大量样本会超 16K 被跳过；只有 `length=short` 的少量样本可能跑进去
+8x B200（每卡 192GB HBM）下 163,840 完全放得下（每卡约 12 GB KV cache）。
+如果你显存不够，可以在 config 里减小此值或减小 `max_batch_size`。
+
+### 2.3 对数据集的影响（基于 max_seq_len=163840）
+
+- **RULER**（debug 包 ~4K tokens）：绝大部分样本能跑进去
+- **ShareGPT**（对话通常 < 4K tokens）：大部分样本可跑
+- **LongBench v2**（上下文可达 272K tokens）：超过 163K 的样本仍会被跳过，但大部分（8K~128K）可以跑
 - **BurstGPT**（合成 prompt，长度可控）：按 `req_tokens` 生成，可以完全控制在限制内
-
-如需跑更长上下文，可在 `config_671B_v3.2.json` 里加 `"max_seq_len": 65536`（或更大），但需要足够显存。
 
 ---
 
