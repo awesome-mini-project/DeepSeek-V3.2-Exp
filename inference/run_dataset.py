@@ -81,7 +81,11 @@ def _prepare_ruler_dataset(split: str, tgz_name: str) -> List[str]:
     if not marker.exists():
         # Clean partial extraction (best effort) by re-extracting over directory.
         with tarfile.open(tgz_path, "r:gz") as tf:
-            tf.extractall(path=extract_dir)
+            # Future-proof extraction behavior (Python 3.14+ changes default filter).
+            try:
+                tf.extractall(path=extract_dir, filter="data")
+            except TypeError:
+                tf.extractall(path=extract_dir)
         marker.write_text("ok\n", encoding="utf-8")
 
     # Collect candidate json/jsonl files.
@@ -100,6 +104,78 @@ def _prepare_ruler_dataset(split: str, tgz_name: str) -> List[str]:
             cand = split_hits
 
     return sorted(cand)
+
+
+def _ruler_prompt_from_raw(ex: Dict[str, Any]) -> str:
+    """
+    Normalize various RULER jsonl schemas into a single prompt string.
+    We intentionally keep it simple since this runner is for instrumentation/trace.
+    """
+    for k in ("input", "prompt", "question", "instruction", "text"):
+        v = ex.get(k)
+        if isinstance(v, str) and v.strip():
+            return v
+    # Common alternative schema: context + query.
+    ctx = ex.get("context")
+    q = ex.get("query") or ex.get("question")
+    if isinstance(ctx, str) and ctx.strip() and isinstance(q, str) and q.strip():
+        return f"Context:\n{ctx}\n\nQuestion:\n{q}\n\nAnswer:"
+    return json.dumps(ex, ensure_ascii=False)
+
+
+def _load_ruler_examples_as_input(files: Sequence[str], limit: int) -> List[Dict[str, str]]:
+    """
+    Load extracted RULER json/jsonl files and return a list of examples with a stable schema:
+    {"input": <prompt_text>}.
+
+    This avoids HuggingFace JSON builder schema-cast errors across heterogeneous RULER tasks.
+    """
+    out: List[Dict[str, str]] = []
+    remaining = limit if limit > 0 else 0
+
+    def _maybe_add(raw: Dict[str, Any]) -> None:
+        nonlocal remaining
+        if remaining == 0 and limit > 0:
+            return
+        prompt = _ruler_prompt_from_raw(raw)
+        if not prompt:
+            return
+        out.append({"input": prompt})
+        if limit > 0:
+            remaining -= 1
+
+    for fp in files:
+        if limit > 0 and remaining <= 0:
+            break
+        low = fp.lower()
+        if low.endswith(".jsonl"):
+            with open(fp, "r", encoding="utf-8") as f:
+                for line in f:
+                    if limit > 0 and remaining <= 0:
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        raw = json.loads(line)
+                    except Exception:
+                        continue
+                    if isinstance(raw, dict):
+                        _maybe_add(raw)
+        elif low.endswith(".json"):
+            try:
+                raw = json.load(open(fp, "r", encoding="utf-8"))
+            except Exception:
+                continue
+            if isinstance(raw, list):
+                for item in raw:
+                    if limit > 0 and remaining <= 0:
+                        break
+                    if isinstance(item, dict):
+                        _maybe_add(item)
+            elif isinstance(raw, dict):
+                _maybe_add(raw)
+    return out
 
 
 def _infer_prompt_text(dataset: str, ex: Dict[str, Any]) -> str:
@@ -215,8 +291,6 @@ def main() -> None:
 
     if args.dataset == "ruler":
         # allenai/ruler_data ships tgz archives; extract under repo data/ and load json/jsonl.
-        if world_size > 1 and dist.is_initialized():
-            dist.barrier()
         if rank == 0:
             files = _prepare_ruler_dataset(args.split, args.ruler_tgz)
         else:
@@ -228,18 +302,22 @@ def main() -> None:
             dist.barrier()
         if not files:
             raise RuntimeError("RULER dataset files not found after extraction. Try --ruler-tgz data_100_samples.tgz.")
-        ds = load_dataset("json", data_files=files, split="train")
+        # Load and normalize locally to avoid heterogeneous-schema cast errors.
+        ds_iter: Iterable[Dict[str, Any]] = _load_ruler_examples_as_input(files, limit=int(args.limit))
     elif args.dataset == "longbenchv2":
         # HF LongBench v2 is commonly published as zai-org/LongBench-v2 with train split only.
         ds = load_dataset("zai-org/LongBench-v2", split="train")
+        if args.limit > 0:
+            ds = ds.select(range(min(args.limit, len(ds))))
+        ds_iter = ds
     else:
         if args.sharegpt_json:
             ds = load_dataset("json", data_files=args.sharegpt_json, split="train")
         else:
             ds = load_dataset(args.sharegpt_dataset, split=args.split)
-
-    if args.limit > 0:
-        ds = ds.select(range(min(args.limit, len(ds))))
+        if args.limit > 0:
+            ds = ds.select(range(min(args.limit, len(ds))))
+        ds_iter = ds
 
     max_prompt_tokens = int(args.max_prompt_tokens)
     if max_prompt_tokens <= 0:
@@ -281,7 +359,7 @@ def main() -> None:
         if len(batch_prompt_tokens) >= int(args.batch_size):
             _flush_batch()
 
-    for ex in ds:
+    for ex in ds_iter:
         if args.dataset == "sharegpt":
             messages = _sharegpt_messages(ex)
             if system_prompt:

@@ -4,3 +4,4 @@ safetensors
 fast_hadamard_transform
 tilelang
 datasets
+huggingface_hub
