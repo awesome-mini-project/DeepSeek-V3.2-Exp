@@ -505,26 +505,40 @@ python3 inference/run_dataset.py --ckpt-path "$CKPT_PATH" --config inference/con
   --dataset ruler --kv-block-size 64 --trace-out outputs/ruler_block64
 ```
 
-### 8.5 四类 workload 跑数
+### 8.5 一键跑全部四类 workload
 
-**在仓库根目录运行**（不是 `inference/` 目录）：
+**推荐用 `scripts/run_all_traces.sh`**，它会按顺序跑 RULER → LongBench v2 → ShareGPT → BurstGPT，
+自动处理 BurstGPT CSV 下载，并打印每一步的耗时。
 
 ```bash
 export CKPT_PATH=/data/models/deepseek-v3.2-exp-s
 
-# RULER（推荐首选，样本短、能跑通）
+# 默认模式：每个数据集取 64 条，最多生成 64 token
+./scripts/run_all_traces.sh
+
+# Smoke test：每个数据集只跑 2 条，最多 8 token（快速验证管线）
+MODE=smoke ./scripts/run_all_traces.sh
+
+# Full 模式：跑完整数据集，生成直到 EOS
+MODE=full ./scripts/run_all_traces.sh
+```
+
+| MODE | LIMIT | MAX_NEW_TOKENS | 用途 |
+|---|---|---|---|
+| `default` | 64 | 64 | 日常采集（~250K 条 trace，几分钟到几十分钟） |
+| `smoke` | 2 | 8 | 快速验证管线是否跑通（~几千条 trace，几十秒） |
+| `full` | 0（不限） | 0（直到 EOS） | 全量采集（trace 很大，可能跑几小时） |
+
+也可以**单独跑某个数据集**（在仓库根目录）：
+
+```bash
+export CKPT_PATH=/data/models/deepseek-v3.2-exp-s
+
 ./scripts/run_trace_ruler.sh
-
-# 用 vLLM 对齐的 block size
-KV_BLOCK_SIZE=64 ./scripts/run_trace_ruler.sh
-
-# LongBench v2（大量超长样本会被跳过；先验证管线为主）
 ./scripts/run_trace_longbenchv2.sh
-
-# ShareGPT（对话分布，大部分样本可跑）
 ./scripts/run_trace_sharegpt.sh
 
-# BurstGPT（需要先导出 CSV）
+# BurstGPT 需要先导出 CSV
 LIMIT=2000 ./scripts/datasets/download_burstgpt.sh
 export BURSTGPT_CSV="data/burstgpt/burstgpt_train_limit2000.csv"
 ./scripts/run_trace_burstgpt.sh
