@@ -448,6 +448,7 @@ cat "$OUT/summary.json" | python3 -m json.tool
 | `--trace-no-sync-cuda` | 关 | 关掉 cuda.synchronize 减少开销 |
 | `--limit` | 64 | 数据集样本数上限 |
 | `--max-new-tokens` | 64/32 | 每条样本最多生成的 token 数 |
+| `--max-prompt-tokens` | 16384 | 超过此长度的 prompt 跳过（防 prefill OOM） |
 | `--batch-size` | 1 | 每批同时推理的 request 数 |
 | `--ruler-tgz` | data_debug.tgz | RULER 包选择（或 data_100_samples.tgz） |
 | `--sharegpt-turn-mode` | full | ShareGPT 多轮模式（full / per_user_turn） |
@@ -508,3 +509,23 @@ wc -l outputs/longbenchv2_*/trace_steps.jsonl
 ### `Token indices sequence length is longer than ... (272555 > 131072)`
 
 这是 tokenizer 的警告（不是崩溃）。超长样本会被 runner 的 `max_prompt_tokens` 过滤跳过。
+
+### `CUDA out of memory` on prefill (Tried to allocate 212 GiB)
+
+本 demo 的 **prefill 阶段用的是 dense MHA（非 DSA 稀疏）**，attention score 矩阵大小为 O(S^2)。
+当 prompt 长度 S 很大时（如 128K tokens），score 矩阵 `(1, S, n_heads, S)` 会占几百 GB，远超单卡显存。
+
+解决方法：用 `MAX_PROMPT_TOKENS` 限制送入模型的 prompt 长度（默认 16384）：
+
+```bash
+MAX_PROMPT_TOKENS=16384 ./scripts/run_trace_ruler.sh
+```
+
+超过此长度的 prompt 会被跳过（不送入模型），不会 OOM。
+如果你需要跑更长的 prompt，需要接入 vLLM 等支持 FlashAttention / chunked prefill 的框架。
+
+### 关于 `max_batch_size`
+
+`config_671B_v3.2.json` 里的 `max_batch_size` 是 **KV cache 预分配维度**，不是运行时 batch size。
+当前设为 1（trace 采集场景 bsz=1），仅影响预分配显存。后续需要批量推理时改大即可。
+原始 `ModelArgs` dataclass 默认值为 8。

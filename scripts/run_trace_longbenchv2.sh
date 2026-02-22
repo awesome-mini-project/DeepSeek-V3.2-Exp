@@ -13,6 +13,7 @@ set -euo pipefail
 # - BATCH_SIZE (default: 1)
 # - KV_BLOCK_SIZE (default: 16)
 # - MAX_NEW_TOKENS (default: 32)
+# - MAX_PROMPT_TOKENS: skip prompts longer than this (default: 16384; prefill is dense O(S^2))
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CKPT_PATH="${CKPT_PATH:?Please set CKPT_PATH}"
@@ -22,6 +23,7 @@ LIMIT="${LIMIT:-64}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 KV_BLOCK_SIZE="${KV_BLOCK_SIZE:-16}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-32}"
+MAX_PROMPT_TOKENS="${MAX_PROMPT_TOKENS:-16384}"
 
 # Force HuggingFace caches to live under the repo (avoid ~/.cache/huggingface).
 DATA_ROOT="${DATAS_DIR:-${DATA_ROOT:-${ROOT_DIR}/data}}"
@@ -53,6 +55,7 @@ ARGS=(
   --batch-size "${BATCH_SIZE}"
   --kv-block-size "${KV_BLOCK_SIZE}"
   --max-new-tokens "${MAX_NEW_TOKENS}"
+  --max-prompt-tokens "${MAX_PROMPT_TOKENS}"
   --trace-out "${OUT_DIR}"
 )
 

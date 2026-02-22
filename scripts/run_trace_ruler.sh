@@ -13,6 +13,7 @@ set -euo pipefail
 # - BATCH_SIZE: batch size (default: 1)
 # - KV_BLOCK_SIZE: logical KV block size in tokens (default: 16)
 # - MAX_NEW_TOKENS: decode length cap (default: 64)
+# - MAX_PROMPT_TOKENS: skip prompts longer than this (default: 16384; prefill is dense O(S^2), long prompts OOM)
 # - RULER_TGZ: which RULER archive to use (default: data_debug.tgz; alternative: data_100_samples.tgz)
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -23,6 +24,7 @@ LIMIT="${LIMIT:-64}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 KV_BLOCK_SIZE="${KV_BLOCK_SIZE:-16}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-64}"
+MAX_PROMPT_TOKENS="${MAX_PROMPT_TOKENS:-16384}"
 RULER_TGZ="${RULER_TGZ:-data_debug.tgz}"
 
 # Force HuggingFace caches to live under the repo (avoid ~/.cache/huggingface).
@@ -56,6 +58,7 @@ ARGS=(
   --batch-size "${BATCH_SIZE}"
   --kv-block-size "${KV_BLOCK_SIZE}"
   --max-new-tokens "${MAX_NEW_TOKENS}"
+  --max-prompt-tokens "${MAX_PROMPT_TOKENS}"
   --trace-out "${OUT_DIR}"
 )
 
