@@ -36,8 +36,16 @@
 
 **为什么不设成官方的 163,840？**
 
-虽然模型位置编码支持 163K，但这个 demo 的 **prefill 阶段用的是 dense MHA（不走 DSA）**，
-attention score 矩阵大小为 O(S^2)。在 8x B200（每卡 ~178GB，模型占 ~150GB）上：
+虽然模型位置编码支持 163K，且 DSA indexer 在 prefill 阶段也会被调用（用 top-2048 mask 掉不需要的位置），
+但**这个 reference demo 的 prefill 实现仍然先 materialize 了全量 O(S^2) 的 dense attention score 矩阵**
+（`model.py:633: einsum("bshd,bthd->bsht")`），再叠加 DSA mask、再 softmax。
+数学上等价于稀疏 attention，但计算量和显存并未节省。
+
+生产框架（vLLM/SGLang）的 DSA prefill 实现不同：它们用 indexer 先选 top-2048，再只对选中位置算 attention，
+真正做到 O(S x k) 而非 O(S^2)。
+
+因此在本 demo 中，prefill 的显存瓶颈是这个 dense score 矩阵。
+在 8x B200（每卡 ~178GB，模型占 ~150GB）上：
 
 | prompt 长度 S | prefill score 矩阵（每卡） | 能否跑 |
 |---|---|---|
@@ -50,8 +58,9 @@ attention score 矩阵大小为 O(S^2)。在 8x B200（每卡 ~178GB，模型占
 因此 `max_seq_len=16384` 是当前 demo 在不 OOM 的前提下的安全上限。
 超过此长度的 prompt 会被 runner 自动跳过（`max_prompt_tokens = max_seq_len - max_new_tokens`）。
 
-> 如需跑更长 prompt，需要接入 vLLM / SGLang 等支持 FlashAttention / chunked prefill 的框架。
-> DSA 的 top-2048 稀疏只在 decode 阶段生效；16K 的 decode 阶段已经足够展示 DSA 的非局部选择行为。
+> 如需跑更长 prompt，需要接入 vLLM / SGLang 等框架——它们的 DSA prefill 实现是真正的 O(S x k) 稀疏计算。
+> 在本 demo 中，DSA 在 prefill 和 decode 阶段都会被调用（indexer 选 top-2048 + mask），
+> 但只有 decode 阶段真正从中获得了计算/显存节省。16K 的 decode 阶段已经足够展示 DSA 的非局部选择行为。
 
 **`max_batch_size` 与 `max_seq_len` 的含义**：
 
@@ -471,7 +480,99 @@ cat "$OUT/summary.json" | python3 -m json.tool
 
 ---
 
-## 9. `/clear` 语义
+## 9. Trace 数据解读：第一条记录为何从 `step_idx=3743` 开始
+
+### 9.1 核心结论
+
+**第一条 trace 记录不是从 token 0 开始的，而是 prefill 之后的第一次 decode forward。**  
+prefill 阶段（seqlen > 1）不产生任何 trace 记录——这是设计行为，不是数据丢失。
+
+### 9.2 生成循环结构（`generate.py`）
+
+```python
+for cur_pos in range(min(prompt_lens), total_len):
+    logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+    # 采样/argmax → tokens[:, cur_pos] = next_token
+    prev_pos = cur_pos
+```
+
+| 迭代轮次 | `prev_pos` | `cur_pos` | `model.forward` 的输入 | `start_pos` | `seqlen` | 说明 |
+|---|---|---|---|---|---|---|
+| 第 1 轮（prefill） | 0 | L（prompt 长度） | `tokens[:, 0:L]` | 0 | L | 一次性处理所有 prompt tokens |
+| 第 2 轮（decode 0） | L | L+1 | `tokens[:, L:L+1]` | L | 1 | **第一次 decode forward** |
+| 第 3 轮（decode 1） | L+1 | L+2 | `tokens[:, L+1:L+2]` | L+1 | 1 | 第二次 decode forward |
+
+> 对于上面这条样本，prompt 长度 L = **3743 tokens**，因此第一次 decode forward 的 `start_pos = 3743`，`end_pos = 3744`。
+
+### 9.3 为什么 prefill 不被 trace
+
+`trace.py / model.py` 中的过滤条件：
+
+```python
+trace_decode_only = (mask is None and seqlen == 1)
+if tracer.enabled and trace_decode_only:
+    tracer.record_dsa_topk(...)
+```
+
+| 阶段 | `mask` | `seqlen` | `trace_decode_only` | 是否写 trace |
+|---|---|---|---|---|
+| prefill | 非 None（因果 mask） | L（> 1） | `False` | **不写** |
+| decode | `None` | 1 | `True` | **写** |
+
+prefill 走的是 dense MHA（`model.py` 第 627 行注释 `# MHA prefill`），没有 DSA top-k 选择，因此无可记录的 B 点数据。
+
+### 9.4 字段逐一解读（以该首条记录为例）
+
+```
+step_idx       = 3743   # start_pos，即 prompt 长度，也是"第几个 decode step（从 0 计）"
+seq_len_current= 3744   # end_pos = start_pos + 1，KV cache 中当前总 token 数
+```
+
+| 字段 | 值 | 含义 |
+|---|---|---|
+| `step_idx` | 3743 | `start_pos`；prompt 有 3743 个 token（位置 0-3742），当前正在生成位置 3743 的 token |
+| `seq_len_current` | 3744 | `end_pos = start_pos + 1`；KV cache 此刻已有 3744 条记录（包含刚写入的位置 3743） |
+| `layer_id` | 0 | 第 0 层（最浅层）；每次 decode forward 61 层各产生一条记录 |
+| `unique_token_pos_count` | 2048 | DSA top-k=2048，从 3744 个候选 token 中选出的唯一位置数 |
+| `offset_min` | 0 | 最近被选中的 token 距当前位置为 0（即位置 3743 本身，recency bias） |
+| `offset_p50` | 1990 | 中位数偏移 ≈ 1990，说明约一半选中 token 在当前位置约 2000 步前 |
+| `offset_max` | 3743 | 最远被选中的 token 是位置 0（sequence 开头），说明 DSA 会回溯到极早期 token |
+| `unique_blocks` | 234 | 2048 个 token 分布在 234 个 block（block_size=16），覆盖率 234×16/3744 ≈ **100%**（第一次 decode 时 KV 几乎全选） |
+| `tokens_per_touched_block.mean` | 8.75 | 每个 touched block 平均贡献 ~8.75 个 selected token（block 内并非 token 均匀分布） |
+
+**kv_fetch 字段**：
+
+| 子字段 | 值 | 含义 |
+|---|---|---|
+| `hbm.hit_blocks` | [0..233]（全部 234 块） | 所有 block 均在 HBM，无需从外部 KV 取 |
+| `hbm.bytes_read` | 4,313,088 | 由 `DS_TRACE_KV_BYTES_PER_TOKEN` 环境变量估算（未设则为 0；此处非 0 说明该次运行设了该 env） |
+| `hbm.latency_us` | 430,801 | 当前 decode step 的整体耗时（µs），由 `torch.cuda.synchronize()` 前后计时写入 |
+| `local_pool / remote_pool` | 均为空 | 当前 demo 没有外部 KV 层级，占位符 |
+
+**prefix 字段**：
+
+| 子字段 | 值 | 含义 |
+|---|---|---|
+| `prefix_cache_hit` | false | 本次 request 没有命中 prefix cache |
+| `prefix_cached_blocks` | 16 | prefix hash 覆盖了最前 256 个 token（16 blocks × 16 tokens/block） |
+| `intersection_ratio` | 0.068 | 234 个选中 block 中只有 16 个（6.8%）落在 prefix 区域，说明 DSA 对早期 token 的依赖较低 |
+| `intersection_blocks` | [0..15] | 被选中且位于 prefix 区域的 16 个 block，全部是序列最前端 |
+
+### 9.5 为什么第一次 decode 几乎选中了全部 block
+
+- **KV cache 目前只有 3744 个 token（234 块）**，而 DSA top-k = 2048
+- `2048 / 3744 ≈ 55%` 的 token 被选中，映射到 block 层面时由于分散度高，234 块几乎全部被覆盖
+- 这是"**序列较短时 DSA 接近 full attention**"的正常现象；随着 decode 继续（KV 增长），block 覆盖率才会下降
+
+### 9.6 数据合理性结论
+
+> **完全合理**。这条记录是 prompt=3743 tokens 的样本在 prefill 结束后的**第一个 decode forward**，layer 0 的 DSA top-k 轨迹。  
+> prefill 阶段不产生 trace 是设计行为（DSA 仅在 decode 阶段生效）。  
+> 后续每多生成一个 token，`step_idx` 递增 1，`seq_len_current` 也递增 1，所有 61 层各写一条记录。
+
+---
+
+## 11. `/clear` 语义
 
 - `generate.py --interactive` 的 `/clear` 只影响交互模式：清空 `messages`，相当于"新会话"
 - **dataset runner（批处理）默认行为**：每个样本/每个 request 都是独立的（等价于"样本之间都 clear"）
@@ -479,16 +580,16 @@ cat "$OUT/summary.json" | python3 -m json.tool
 
 ---
 
-## 10. 已知限制与后续对齐点
+## 12. 已知限制与后续对齐点
 
 - 当前没有真实的 vLLM PagedAttention，因此 **B 点 block_id 是逻辑近似**
 - 当前没有外部 KV，因此 **C 点为 HBM-only**；`kv_fetch` 字段保持 tier 结构，便于后续接入 MemFabric/MemCache/Mooncake
 - 当前没有真实 prefix cache，因此 **D 点是复用关系分析**（基于 prefix hash）
-- 当前 demo `max_seq_len=16384`，受 prefill dense O(S^2) 限制无法跑更长；后续需接入 vLLM + FlashAttention 才能采集长上下文轨迹
+- 当前 demo `max_seq_len=16384`；虽然 DSA 在 prefill 也被调用（mask），但底层仍 materialize 全量 O(S^2) score 矩阵，无法跑更长；接入 vLLM/SGLang 后 prefill 才是真正 O(S x k) 稀疏
 
 ---
 
-## 11. 常见问题排查
+## 13. 常见问题排查
 
 ### HuggingFace 下载失败 / 需要权限
 
@@ -528,7 +629,7 @@ wc -l outputs/longbenchv2_*/trace_steps.jsonl
 
 ### `CUDA out of memory` on prefill (Tried to allocate 212 GiB)
 
-本 demo 的 **prefill 阶段用的是 dense MHA（非 DSA 稀疏）**，attention score 矩阵大小为 O(S^2)。
+本 demo 的 prefill 阶段虽然调用了 DSA indexer（mask），但底层仍然 **materialize 了全量 O(S^2) 的 dense attention score 矩阵**。
 当 prompt 长度 S 很大时（如 128K tokens），score 矩阵 `(1, S, n_heads, S)` 会占几百 GB，远超单卡显存。
 
 解决方法：用 `MAX_PROMPT_TOKENS` 限制送入模型的 prompt 长度（默认 16384）：
