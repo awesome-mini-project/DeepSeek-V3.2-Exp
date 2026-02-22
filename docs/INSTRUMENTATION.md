@@ -247,7 +247,7 @@ outputs/ruler_1771772829/
 ```
 
 - 子目录名 `block64` 来自 `--kv-block-size 64`，你可以用不同 block size 跑多次，结果会在不同子目录并排存放
-- **JSONL 按 request 数分片**（不是按记录数）：每个 request 的所有 decode step × 所有 layer 的 trace 保证在同一片里
+- **JSONL 按 request 数分片**（不是按记录数）：按 `request_id` 做确定性分桶（例如每 4 个 request 一片），因此**同一个 request 的所有 decode step × 所有 layer 记录一定在同一个文件里**
 - 文件名 `{start}_{end}` 表示 request ID 范围（从文件名就能看出跑了多少条 request）
 - 分片大小由 `--max-requests-per-file` 控制（默认 **4**；设 0 不分片，全写一个文件）
 - 在 `scripts/run_trace_*.sh` 里，可用环境变量 `MAX_REQUESTS_PER_FILE` 覆盖该值（脚本会透传到 `--max-requests-per-file`）

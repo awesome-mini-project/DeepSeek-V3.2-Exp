@@ -255,7 +255,12 @@ class TraceWriter:
     is not blocked by disk writes (which caused NCCL timeouts on large runs).
 
     When max_requests_per_file > 0, a new file is created every N requests.
-    File naming: trace_steps_{start}_{end}.jsonl (start/end are request IDs)
+    File naming: trace_steps_{start}_{end}.jsonl (start/end are request ID range, end is exclusive)
+
+    IMPORTANT: records are emitted interleaved across requests (batch decode).
+    Therefore sharding must be deterministic by request_id (request_id -> shard),
+    not by "the first N unique request IDs seen so far", otherwise a request can
+    be split across multiple files.
     """
 
     def __init__(self, out_dir: str, filename: str = "trace_steps.jsonl", max_requests_per_file: int = 4):
@@ -263,12 +268,14 @@ class TraceWriter:
         _ensure_dir(self.out_dir)
         self.filename = filename
         self.max_requests_per_file = int(max_requests_per_file)
-        self._fh = None
+        self._single_fh = None
         self._total_records = 0
-        self._cur_req_start = 0
-        self._cur_req_end = 0
-        self._seen_requests: set = set()
-        self._requests_in_file = 0
+        # shard_start -> max_seen_request_id_plus_one
+        self._shard_max_end: Dict[int, int] = {}
+        # Keep a small LRU of open shard file handles to avoid open/close on every record.
+        self._shard_fhs: Dict[int, Any] = {}
+        self._shard_lru: List[int] = []
+        self._max_open_shards = 8
 
         import threading
         import queue as _queue_mod
@@ -281,14 +288,42 @@ class TraceWriter:
         suffix = Path(self.filename).suffix
         return self.out_dir / f"{stem}_{start}_{end}{suffix}"
 
-    def _open_if_needed(self) -> None:
-        if self._fh is not None:
+    def _open_single_if_needed(self) -> None:
+        if self._single_fh is not None:
             return
-        if self.max_requests_per_file > 0:
-            path = self._shard_path(self._cur_req_start, self._cur_req_start + self.max_requests_per_file)
-        else:
-            path = self.out_dir / self.filename
-        self._fh = open(path, "a", encoding="utf-8")
+        path = self.out_dir / self.filename
+        self._single_fh = open(path, "a", encoding="utf-8")
+
+    def _touch_lru(self, shard_start: int) -> None:
+        try:
+            self._shard_lru.remove(int(shard_start))
+        except ValueError:
+            pass
+        self._shard_lru.append(int(shard_start))
+
+    def _open_shard_fh(self, shard_start: int) -> Any:
+        shard_start = int(shard_start)
+        fh = self._shard_fhs.get(shard_start)
+        if fh is not None:
+            self._touch_lru(shard_start)
+            return fh
+
+        # Evict LRU shard if too many open files.
+        if len(self._shard_fhs) >= self._max_open_shards and self._shard_lru:
+            evict = int(self._shard_lru.pop(0))
+            old_fh = self._shard_fhs.pop(evict, None)
+            try:
+                if old_fh is not None:
+                    old_fh.close()
+            except Exception:
+                pass
+
+        shard_end = shard_start + int(self.max_requests_per_file)
+        path = self._shard_path(shard_start, shard_end)
+        fh = open(path, "a", encoding="utf-8")
+        self._shard_fhs[shard_start] = fh
+        self._touch_lru(shard_start)
+        return fh
 
     def _bg_writer(self) -> None:
         while True:
@@ -296,33 +331,27 @@ class TraceWriter:
             if item is None:
                 break
             line, req_id = item
-            self._open_if_needed()
-            self._fh.write(line)
+            if self.max_requests_per_file <= 0 or req_id is None:
+                self._open_single_if_needed()
+                assert self._single_fh is not None
+                self._single_fh.write(line)
+                continue
 
-            if req_id is not None and req_id not in self._seen_requests:
-                self._seen_requests.add(req_id)
-                self._requests_in_file += 1
-                self._cur_req_end = int(req_id) + 1
-
-            if self.max_requests_per_file > 0 and self._requests_in_file >= self.max_requests_per_file:
-                self._rotate_file()
+            rid = int(req_id)
+            n = int(self.max_requests_per_file)
+            shard_start = (rid // n) * n
+            fh = self._open_shard_fh(shard_start)
+            fh.write(line)
+            # Track actual end (exclusive) for rename-on-close (last shard).
+            cur_end = int(self._shard_max_end.get(shard_start, shard_start))
+            if rid + 1 > cur_end:
+                self._shard_max_end[shard_start] = int(rid + 1)
 
     def write(self, rec: Dict[str, Any]) -> None:
         line = json.dumps(rec, ensure_ascii=False) + "\n"
         req_id = rec.get("request_id")
         self._total_records += 1
         self._queue.put((line, req_id))
-
-    def _rotate_file(self) -> None:
-        if self._fh is not None:
-            old_path = self._shard_path(self._cur_req_start, self._cur_req_start + self.max_requests_per_file)
-            new_path = self._shard_path(self._cur_req_start, self._cur_req_end)
-            self._fh.close()
-            self._fh = None
-            if old_path.exists() and old_path != new_path:
-                old_path.rename(new_path)
-            self._cur_req_start = self._cur_req_end
-            self._requests_in_file = 0
 
     @property
     def total_records(self) -> int:
@@ -331,17 +360,38 @@ class TraceWriter:
     def close(self) -> None:
         self._queue.put(None)
         self._writer_thread.join(timeout=60)
-        if self._fh is not None:
-            if self.max_requests_per_file > 0 and self._requests_in_file > 0:
-                old_path = self._shard_path(self._cur_req_start, self._cur_req_start + self.max_requests_per_file)
-                new_path = self._shard_path(self._cur_req_start, self._cur_req_end)
-                self._fh.close()
-                self._fh = None
-                if old_path.exists() and old_path != new_path:
-                    old_path.rename(new_path)
-            else:
-                self._fh.close()
-                self._fh = None
+        # Close all open shard files.
+        for _, fh in list(self._shard_fhs.items()):
+            try:
+                fh.close()
+            except Exception:
+                pass
+        self._shard_fhs.clear()
+        self._shard_lru.clear()
+
+        if self._single_fh is not None:
+            try:
+                self._single_fh.close()
+            except Exception:
+                pass
+            self._single_fh = None
+
+        # Best-effort rename shards to reflect the actual end request_id (exclusive).
+        if self.max_requests_per_file > 0:
+            n = int(self.max_requests_per_file)
+            for shard_start, actual_end in list(self._shard_max_end.items()):
+                shard_start = int(shard_start)
+                actual_end = int(actual_end)
+                fixed_end = shard_start + n
+                if actual_end <= 0 or actual_end >= fixed_end:
+                    continue
+                old_path = self._shard_path(shard_start, fixed_end)
+                new_path = self._shard_path(shard_start, actual_end)
+                try:
+                    if old_path.exists() and old_path != new_path:
+                        old_path.rename(new_path)
+                except Exception:
+                    pass
 
 
 @dataclass
