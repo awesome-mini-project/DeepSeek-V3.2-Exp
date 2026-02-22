@@ -190,8 +190,9 @@ class TraceWriter:
         self.filename = filename
         self.max_records_per_file = int(max_records_per_file)
         self._fh = None
-        self._records = 0
-        self._file_idx = 0
+        self._records_in_file = 0
+        self._total_records = 0
+        self._file_start = 0
 
     def _open_if_needed(self) -> None:
         if self._fh is not None:
@@ -200,23 +201,36 @@ class TraceWriter:
         if self.max_records_per_file > 0:
             stem = Path(self.filename).stem
             suffix = Path(self.filename).suffix
-            path = self.out_dir / f"{stem}.{self._file_idx:04d}{suffix}"
+            path = self.out_dir / f"{stem}_{self._file_start}_{self._file_start + self.max_records_per_file}{suffix}"
         self._fh = open(path, "a", encoding="utf-8")
 
     def write(self, rec: Dict[str, Any]) -> None:
         self._open_if_needed()
         self._fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        self._records += 1
-        if self.max_records_per_file > 0 and self._records >= self.max_records_per_file:
+        self._records_in_file += 1
+        self._total_records += 1
+        if self.max_records_per_file > 0 and self._records_in_file >= self.max_records_per_file:
             self._fh.close()
             self._fh = None
-            self._records = 0
-            self._file_idx += 1
+            self._file_start = self._total_records
+            self._records_in_file = 0
+
+    @property
+    def total_records(self) -> int:
+        return self._total_records
 
     def close(self) -> None:
         if self._fh is not None:
-            self._fh.close()
-            self._fh = None
+            if self.max_records_per_file > 0 and self._records_in_file > 0:
+                old_path = self.out_dir / f"{Path(self.filename).stem}_{self._file_start}_{self._file_start + self.max_records_per_file}{Path(self.filename).suffix}"
+                new_path = self.out_dir / f"{Path(self.filename).stem}_{self._file_start}_{self._total_records}{Path(self.filename).suffix}"
+                self._fh.close()
+                self._fh = None
+                if old_path.exists() and old_path != new_path:
+                    old_path.rename(new_path)
+            else:
+                self._fh.close()
+                self._fh = None
 
 
 @dataclass
@@ -253,7 +267,9 @@ class _DistributionSummary:
 class Tracer:
     def __init__(self, cfg: TraceConfig):
         self.cfg = cfg
-        self.writer = TraceWriter(cfg.out_dir, max_records_per_file=cfg.max_records_per_file)
+        trace_dir = str(Path(cfg.out_dir) / f"block{cfg.kv_block_size_tokens}")
+        self.trace_dir = trace_dir
+        self.writer = TraceWriter(trace_dir, max_records_per_file=cfg.max_records_per_file)
         self.ctx = TraceContext()
         self._unique_blocks = _DistributionSummary()
         self._tokens_per_block = _DistributionSummary()

@@ -69,7 +69,10 @@ def generate(
     """
     prompt_lens = [len(t) for t in prompt_tokens]
     assert max(prompt_lens) <= model.max_seq_len, f"Prompt length exceeds model maximum sequence length (max_seq_len={model.max_seq_len})"
-    total_len = min(model.max_seq_len, max_new_tokens + max(prompt_lens))
+    if max_new_tokens <= 0:
+        total_len = model.max_seq_len
+    else:
+        total_len = min(model.max_seq_len, max_new_tokens + max(prompt_lens))
     tokens = torch.full((len(prompt_tokens), total_len), -1, dtype=torch.long, device="cuda")
     for i, t in enumerate(prompt_tokens):
         tokens[i, :len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")

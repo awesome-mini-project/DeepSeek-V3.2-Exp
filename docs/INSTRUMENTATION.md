@@ -231,9 +231,23 @@ DeepSeek-V3.2-Exp/
 
 ## 5. 输出文件与 JSONL Schema
 
-### 5.1 输出目录
+### 5.1 输出目录结构
 
 由 `--trace-out` 指定（或自动生成到 `outputs/<dataset>_<timestamp>/`）。
+trace 文件会写到 `--trace-out` 下按 block size 命名的子目录里：
+
+```
+outputs/ruler_1771772829/
+└── block64/                          ← kv-block-size=64 的 trace
+    ├── trace_steps_0_10000.jsonl     ← 第 0~9999 条记录
+    ├── trace_steps_10000_20000.jsonl ← 第 10000~19999 条记录
+    ├── trace_steps_20000_23456.jsonl ← 第 20000~23455 条（最后一片，实际行数）
+    └── summary.json
+```
+
+- 子目录名 `block64` 来自 `--kv-block-size 64`，你可以用不同 block size 跑多次，结果会在不同子目录并排存放
+- JSONL 文件名包含 `{start}_{end}` 表示记录编号范围（从文件名就能看出跑了多少条）
+- 分片大小由 `--max-records-per-file` 控制（默认 10000；设 0 不分片，全写一个文件）
 
 ```
 outputs/ruler_1771772829/
@@ -532,6 +546,8 @@ cat "$OUT/summary.json" | python3 -m json.tool
 | `--limit` | 64 | 数据集样本数上限 |
 | `--max-new-tokens` | 64/32 | 每条样本最多生成的 token 数 |
 | `--max-prompt-tokens` | 16384 | 超过此长度的 prompt 跳过（防 prefill OOM） |
+| `--max-new-tokens` | 64 | 每条样本最多生成 token 数；**设 0 = 直到 EOS 或 max_seq_len** |
+| `--max-records-per-file` | 10000 | JSONL 分片：每 N 条记录换一个文件（0 = 不分片） |
 | `--batch-size` | 1 | 每批同时推理的 request 数（若 > config `max_batch_size`，runner 会自动扩大预分配） |
 | `--temperature` | 0.6 | 采样温度（0 = greedy argmax，完全确定性） |
 | `--ruler-tgz` | data_debug.tgz | RULER 包选择（或 data_100_samples.tgz） |
@@ -578,8 +594,9 @@ temperature 带来的随机性不影响分布的趋势和结论。
 **`--max-new-tokens M`**：每条样本最多**生成 M 个新 token**（decode 步数上限）。
 
 - `--max-new-tokens 64`：模型最多生成 64 个 token
+- **`--max-new-tokens 0`**：**不设上限，直到模型生成 EOS 或到达 max_seq_len**（"自然结束"模式）
 - **但模型可以提前停止**：`generate()` 里有 EOS 检测（如果模型输出了 `eos_token`，这条 request 的 decode 就结束）
-- 所以 `max-new-tokens=64` 的含义是"**最多 64 步，遇 EOS 提前结束**"
+- 所以 `max-new-tokens=64` 的含义是"**最多 64 步，遇 EOS 提前结束**"；`0` 的含义是"只等 EOS"
 
 **它们影响的是 trace 的数量**：
 

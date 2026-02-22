@@ -224,8 +224,9 @@ def main() -> None:
             "batch_size": int(args.batch_size),
             "max_new_tokens_cap": int(args.max_new_tokens_cap),
         }
-        with open(os.path.join(trace_out, "summary.json"), "w", encoding="utf-8") as f:
+        with open(os.path.join(tracer.trace_dir, "summary.json"), "w", encoding="utf-8") as f:
             json.dump(summary, f, ensure_ascii=False, indent=2)
+        print(f"[output] {tracer.trace_dir}  ({tracer.writer.total_records} records)")
 
     tracer.close()
     if world_size > 1:

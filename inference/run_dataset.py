@@ -255,6 +255,7 @@ def main() -> None:
     parser.add_argument("--trace-sample-rate", type=float, default=1.0)
     parser.add_argument("--trace-prefix-key-tokens", type=int, default=256)
     parser.add_argument("--trace-no-sync-cuda", action="store_true")
+    parser.add_argument("--max-records-per-file", type=int, default=10000)
     parser.add_argument("--max-prompt-tokens", type=int, default=0)
     parser.add_argument("--chat-system-prompt", type=str, default="")
     parser.add_argument("--sharegpt-json", type=str, default="")
@@ -296,6 +297,7 @@ def main() -> None:
         rank0_only=True,
         sync_cuda_for_timing=not bool(args.trace_no_sync_cuda),
         prefix_cache_key_tokens=int(args.trace_prefix_key_tokens),
+        max_records_per_file=int(args.max_records_per_file),
     )
     tracer = ds_trace.init_tracer(cfg)
     tracer.set_run_meta(run_name=os.path.basename(trace_out.rstrip("/")), dataset=args.dataset)
@@ -451,9 +453,11 @@ def main() -> None:
     print(f"[done] samples_seen={n_samples_seen}  requests_generated={next_request_id}  skipped_too_long={n_skipped_long}")
 
     if rank == 0:
-        summary_path = os.path.join(trace_out, "summary.json")
+        summary = tracer.get_summary()
+        summary_path = os.path.join(tracer.trace_dir, "summary.json")
         with open(summary_path, "w", encoding="utf-8") as f:
-            json.dump(tracer.get_summary(), f, ensure_ascii=False, indent=2)
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+        print(f"[output] {tracer.trace_dir}  ({tracer.writer.total_records} records)")
     tracer.close()
 
     if world_size > 1:
