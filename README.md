@@ -84,6 +84,10 @@ For **high-performance CUDA kernels**, indexer logit kernels (including paged ve
 
 
 
+## DSA Trace Instrumentation
+
+See [`docs/INSTRUMENTATION.md`](docs/INSTRUMENTATION.md) for the complete guide on DSA trace collection, including instrumentation points, dataset runners, output schema, and troubleshooting.
+
 ## How to Run Locally
 
 ### HuggingFace
