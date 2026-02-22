@@ -363,10 +363,11 @@ def main() -> None:
                     raise RuntimeError("ShareGPT fallback download failed; please provide --sharegpt-json.")
                 ds_iter = load_dataset("json", data_files=sharegpt_path, split="train", streaming=True)
 
-    if total_dataset_size is not None:
-        print(f"[dataset] {args.dataset}: total={total_dataset_size}, selected={selected_size} (--limit={args.limit})")
-    else:
-        print(f"[dataset] {args.dataset}: streaming mode (--limit={args.limit})")
+    if rank == 0:
+        if total_dataset_size is not None:
+            print(f"[dataset] {args.dataset}: total={total_dataset_size}, selected={selected_size} (--limit={args.limit})", flush=True)
+        else:
+            print(f"[dataset] {args.dataset}: streaming mode (--limit={args.limit})", flush=True)
 
     max_prompt_tokens = int(args.max_prompt_tokens)
     if max_prompt_tokens <= 0:
@@ -412,11 +413,13 @@ def main() -> None:
             _flush_batch()
 
     def _print_progress() -> None:
-        label = f"[progress] samples={n_samples_seen}"
+        if rank != 0:
+            return
+        label = f"\r[progress] samples={n_samples_seen}"
         if selected_size is not None:
             label += f"/{selected_size}"
-        label += f"  requests={next_request_id}  skipped_long={n_skipped_long}"
-        sys.stderr.write(f"\r{label}")
+        label += f"  requests={next_request_id}  skipped_long={n_skipped_long}   "
+        sys.stderr.write(label)
         sys.stderr.flush()
 
     if args.dataset == "sharegpt" and args.limit > 0 and not hasattr(ds_iter, "select"):
@@ -424,8 +427,7 @@ def main() -> None:
 
     for ex in ds_iter:
         n_samples_seen += 1
-        if n_samples_seen % 1 == 0:
-            _print_progress()
+        _print_progress()
         if args.dataset == "sharegpt":
             messages = _sharegpt_messages(ex)
             if system_prompt:
@@ -449,8 +451,10 @@ def main() -> None:
             ptoks = tokenizer.apply_chat_template(msgs, add_generation_prompt=True)
             _enqueue_request(ptoks)
     _flush_batch()
-    sys.stderr.write("\n")
-    print(f"[done] samples_seen={n_samples_seen}  requests_generated={next_request_id}  skipped_too_long={n_skipped_long}")
+    if rank == 0:
+        sys.stderr.write("\n")
+        sys.stderr.flush()
+        print(f"[done] samples_seen={n_samples_seen}  requests_generated={next_request_id}  skipped_too_long={n_skipped_long}", flush=True)
 
     if rank == 0:
         summary = tracer.get_summary()

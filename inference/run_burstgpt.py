@@ -146,7 +146,8 @@ def main() -> None:
     os.environ["DS_TRACE_KV_BYTES_PER_TOKEN"] = str(bytes_per_token)
 
     reqs = _read_burstgpt_csv(args.burstgpt_csv, limit=int(args.limit))
-    print(f"[dataset] burstgpt: loaded {len(reqs)} requests from CSV (--limit={args.limit})")
+    if rank == 0:
+        print(f"[dataset] burstgpt: loaded {len(reqs)} requests from CSV (--limit={args.limit})", flush=True)
     prefix_analyzer = ds_trace.PrefixCacheAnalyzer(prefix_cache_key_tokens=args.trace_prefix_key_tokens)
 
     import sys as _sys
@@ -204,11 +205,14 @@ def main() -> None:
 
         now_t += service_s
         n_batches_done += 1
-        _sys.stderr.write(f"\r[progress] batches={n_batches_done}  requests_done={len(latencies_ms)}/{len(reqs)}")
-        _sys.stderr.flush()
+        if rank == 0:
+            _sys.stderr.write(f"\r[progress] batches={n_batches_done}  requests_done={len(latencies_ms)}/{len(reqs)}   ")
+            _sys.stderr.flush()
 
-    _sys.stderr.write("\n")
-    print(f"[done] batches={n_batches_done}  requests_done={len(latencies_ms)}")
+    if rank == 0:
+        _sys.stderr.write("\n")
+        _sys.stderr.flush()
+        print(f"[done] batches={n_batches_done}  requests_done={len(latencies_ms)}", flush=True)
 
     if rank == 0:
         latencies_ms.sort()
