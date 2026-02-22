@@ -869,3 +869,31 @@ MAX_PROMPT_TOKENS=16384 ./scripts/run_trace_ruler.sh
 `config_671B_v3.2.json` 里的 `max_batch_size` 是 **KV cache 预分配维度**，不是运行时 batch size。
 当前设为 1（trace 采集场景 bsz=1），仅影响预分配显存。后续需要批量推理时改大即可。
 原始 `ModelArgs` dataclass 默认值为 8。
+
+### NCCL timeout / CUDA error on large runs
+
+跑全量数据集（如 `LIMIT=-1`）时，如果某条样本触发 CUDA error 或计算特别慢，会导致
+NCCL collective 超时（默认 600 秒），整个进程组崩溃。
+
+**解决方案：用分块脚本 `scripts/run_trace_chunked.sh`**，它会把数据集按 chunk 分组，
+每组启动独立的 torchrun 进程。如果某组崩溃，等待 GPU 冷却后跳过该组继续下一组：
+
+```bash
+# 每 100 条样本一组，崩溃后等 30 秒再继续
+./scripts/run_trace_chunked.sh ruler
+
+# 自定义 chunk 大小和总量
+CHUNK_SIZE=50 TOTAL_LIMIT=500 ./scripts/run_trace_chunked.sh ruler
+
+# 全量数据
+TOTAL_LIMIT=0 ./scripts/run_trace_chunked.sh ruler
+```
+
+输出结构：
+```
+outputs/ruler_chunked_xxx/
+├── chunk_0_offset0/block64/...      ← 第 0~99 条
+├── chunk_1_offset100/block64/...    ← 第 100~199 条（如果崩溃了这个目录可能不完整）
+├── chunk_2_offset200/block64/...    ← 跳过崩溃后继续
+└── ...
+```
