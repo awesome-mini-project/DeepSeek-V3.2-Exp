@@ -78,6 +78,7 @@ class TraceConfig:
     sample_rate: float = 1.0
     rank0_only: bool = True
     sync_cuda_for_timing: bool = True
+    enable_prefix_analysis: bool = False
     prefix_cache_key_tokens: int = 256
     max_requests_per_file: int = 10  # shard JSONL every N requests; 0 = no split
 
@@ -185,7 +186,10 @@ class PrefixCacheAnalyzer:
 
 class TraceWriter:
     """
-    Writes JSONL trace records, with optional sharding by request count.
+    Writes JSONL trace records asynchronously, with optional sharding by request count.
+
+    IO is offloaded to a background thread so that rank 0's GPU compute path
+    is not blocked by disk writes (which caused NCCL timeouts on large runs).
 
     When max_requests_per_file > 0, a new file is created every N requests.
     File naming: trace_steps_{start}_{end}.jsonl (start/end are request IDs)
@@ -203,6 +207,12 @@ class TraceWriter:
         self._seen_requests: set = set()
         self._requests_in_file = 0
 
+        import threading
+        import queue as _queue_mod
+        self._queue: _queue_mod.Queue = _queue_mod.Queue(maxsize=50000)
+        self._writer_thread = threading.Thread(target=self._bg_writer, daemon=True)
+        self._writer_thread.start()
+
     def _shard_path(self, start: int, end: int) -> Path:
         stem = Path(self.filename).stem
         suffix = Path(self.filename).suffix
@@ -217,19 +227,28 @@ class TraceWriter:
             path = self.out_dir / self.filename
         self._fh = open(path, "a", encoding="utf-8")
 
+    def _bg_writer(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                break
+            line, req_id = item
+            self._open_if_needed()
+            self._fh.write(line)
+
+            if req_id is not None and req_id not in self._seen_requests:
+                self._seen_requests.add(req_id)
+                self._requests_in_file += 1
+                self._cur_req_end = int(req_id) + 1
+
+            if self.max_requests_per_file > 0 and self._requests_in_file >= self.max_requests_per_file:
+                self._rotate_file()
+
     def write(self, rec: Dict[str, Any]) -> None:
-        self._open_if_needed()
-        self._fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        self._total_records += 1
-
+        line = json.dumps(rec, ensure_ascii=False) + "\n"
         req_id = rec.get("request_id")
-        if req_id is not None and req_id not in self._seen_requests:
-            self._seen_requests.add(req_id)
-            self._requests_in_file += 1
-            self._cur_req_end = int(req_id) + 1
-
-        if self.max_requests_per_file > 0 and self._requests_in_file >= self.max_requests_per_file:
-            self._rotate_file()
+        self._total_records += 1
+        self._queue.put((line, req_id))
 
     def _rotate_file(self) -> None:
         if self._fh is not None:
@@ -247,6 +266,8 @@ class TraceWriter:
         return self._total_records
 
     def close(self) -> None:
+        self._queue.put(None)
+        self._writer_thread.join(timeout=60)
         if self._fh is not None:
             if self.max_requests_per_file > 0 and self._requests_in_file > 0:
                 old_path = self._shard_path(self._cur_req_start, self._cur_req_start + self.max_requests_per_file)
@@ -256,9 +277,8 @@ class TraceWriter:
                 if old_path.exists() and old_path != new_path:
                     old_path.rename(new_path)
             else:
-                if self._fh is not None:
-                    self._fh.close()
-                    self._fh = None
+                self._fh.close()
+                self._fh = None
 
 
 @dataclass
@@ -406,19 +426,20 @@ class Tracer:
             prefix_hit = False
             prefix_cached_blocks = 0
             prefix_key = ""
-            if prefix_infos is not None:
+            intersection_ratio = 0.0
+            intersection_blocks: List[int] = []
+            if self.cfg.enable_prefix_analysis and prefix_infos is not None:
                 pi = prefix_infos[bi]
                 prefix_hit = bool(pi.prefix_cache_hit)
                 prefix_cached_blocks = int(pi.prefix_cached_blocks)
                 prefix_key = str(pi.prefix_key)
-
-            intersection_blocks = [bid for bid in unique_block_ids if bid < prefix_cached_blocks]
-            intersection_ratio = (len(intersection_blocks) / len(unique_block_ids)) if unique_block_ids else 0.0
-            if intersection_blocks:
-                hot = self._prefix_hot_blocks.setdefault(req_id, {})
-                for bid in intersection_blocks:
-                    hot[bid] = hot.get(bid, 0) + 1
-            self._intersection_ratio.append(float(intersection_ratio))
+                intersection_blocks = [bid for bid in unique_block_ids if bid < prefix_cached_blocks]
+                intersection_ratio = (len(intersection_blocks) / len(unique_block_ids)) if unique_block_ids else 0.0
+                if intersection_blocks:
+                    hot = self._prefix_hot_blocks.setdefault(req_id, {})
+                    for bid in intersection_blocks:
+                        hot[bid] = hot.get(bid, 0) + 1
+                self._intersection_ratio.append(float(intersection_ratio))
 
             # C-point: HBM-only logical fetch stats (placeholder for future tiered fetch).
             bytes_per_token = 0
@@ -464,14 +485,15 @@ class Tracer:
                     "local_pool": {"hit_blocks": [], "bytes_read": 0, "read_ops": 0, "latency_us": None, "batch_size": 0},
                     "remote_pool": {"hit_blocks": [], "bytes_read": 0, "read_ops": 0, "latency_us": None, "batch_size": 0},
                 },
-                "prefix": {
+            }
+            if self.cfg.enable_prefix_analysis:
+                rec["prefix"] = {
                     "prefix_cache_hit": prefix_hit,
                     "prefix_cached_blocks": prefix_cached_blocks,
                     "prefix_key": prefix_key,
                     "intersection_ratio": intersection_ratio,
                     "intersection_blocks": intersection_blocks,
-                },
-            }
+                }
 
             if self.cfg.store_selected_token_pos:
                 rec["selected_token_pos"] = selected
