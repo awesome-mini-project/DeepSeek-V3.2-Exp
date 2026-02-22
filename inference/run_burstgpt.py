@@ -146,15 +146,16 @@ def main() -> None:
     os.environ["DS_TRACE_KV_BYTES_PER_TOKEN"] = str(bytes_per_token)
 
     reqs = _read_burstgpt_csv(args.burstgpt_csv, limit=int(args.limit))
-    # Prefix analyzer is intentionally simple for BurstGPT since prompts are synthetic.
+    print(f"[dataset] burstgpt: loaded {len(reqs)} requests from CSV (--limit={args.limit})")
     prefix_analyzer = ds_trace.PrefixCacheAnalyzer(prefix_cache_key_tokens=args.trace_prefix_key_tokens)
 
-    # Single-server FIFO batcher simulation (one GPU worker).
+    import sys as _sys
     now_t = 0.0
     i = 0
     queue: List[Tuple[int, BurstRequest]] = []
     latencies_ms: List[float] = []
     request_id = 0
+    n_batches_done = 0
 
     while i < len(reqs) or queue:
         # Enqueue arrivals up to now_t.
@@ -202,6 +203,12 @@ def main() -> None:
             latencies_ms.append((wait_s + service_s) * 1000.0)
 
         now_t += service_s
+        n_batches_done += 1
+        _sys.stderr.write(f"\r[progress] batches={n_batches_done}  requests_done={len(latencies_ms)}/{len(reqs)}")
+        _sys.stderr.flush()
+
+    _sys.stderr.write("\n")
+    print(f"[done] batches={n_batches_done}  requests_done={len(latencies_ms)}")
 
     if rank == 0:
         latencies_ms.sort()

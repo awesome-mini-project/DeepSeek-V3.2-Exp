@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import time
 from argparse import ArgumentParser
 from pathlib import Path
@@ -304,6 +305,9 @@ def main() -> None:
 
     prefix_analyzer = ds_trace.PrefixCacheAnalyzer(prefix_cache_key_tokens=args.trace_prefix_key_tokens)
 
+    total_dataset_size: Optional[int] = None
+    selected_size: Optional[int] = None
+
     if args.dataset == "ruler":
         # allenai/ruler_data ships tgz archives; extract under repo data/ and load json/jsonl.
         if rank == 0:
@@ -318,25 +322,32 @@ def main() -> None:
         if not files:
             raise RuntimeError("RULER dataset files not found after extraction. Try --ruler-tgz data_100_samples.tgz.")
         # Load and normalize locally to avoid heterogeneous-schema cast errors.
-        ds_iter: Iterable[Dict[str, Any]] = _load_ruler_examples_as_input(files, limit=int(args.limit))
+        all_examples = _load_ruler_examples_as_input(files, limit=0)
+        total_dataset_size = len(all_examples)
+        if args.limit > 0:
+            all_examples = all_examples[:int(args.limit)]
+        selected_size = len(all_examples)
+        ds_iter: Iterable[Dict[str, Any]] = all_examples
     elif args.dataset == "longbenchv2":
         # HF LongBench v2 is commonly published as zai-org/LongBench-v2 with train split only.
         ds = load_dataset("zai-org/LongBench-v2", split="train")
+        total_dataset_size = len(ds)
         if args.limit > 0:
             ds = ds.select(range(min(args.limit, len(ds))))
+        selected_size = len(ds)
         ds_iter = ds
     else:
         if args.sharegpt_json:
-            # Local JSON file; stream to avoid loading everything into memory.
             ds_iter = load_dataset("json", data_files=args.sharegpt_json, split="train", streaming=True)
         else:
             try:
                 ds = load_dataset(args.sharegpt_dataset, split=args.split)
+                total_dataset_size = len(ds)
                 if args.limit > 0:
                     ds = ds.select(range(min(args.limit, len(ds))))
+                selected_size = len(ds)
                 ds_iter = ds
             except DataFilesNotFoundError:
-                # Fallback: download an explicit JSON file and stream-load it.
                 if rank == 0:
                     sharegpt_path = _prepare_sharegpt_json_file(args.sharegpt_dataset, args.sharegpt_hf_file)
                 else:
@@ -350,6 +361,11 @@ def main() -> None:
                     raise RuntimeError("ShareGPT fallback download failed; please provide --sharegpt-json.")
                 ds_iter = load_dataset("json", data_files=sharegpt_path, split="train", streaming=True)
 
+    if total_dataset_size is not None:
+        print(f"[dataset] {args.dataset}: total={total_dataset_size}, selected={selected_size} (--limit={args.limit})")
+    else:
+        print(f"[dataset] {args.dataset}: streaming mode (--limit={args.limit})")
+
     max_prompt_tokens = int(args.max_prompt_tokens)
     if max_prompt_tokens <= 0:
         max_prompt_tokens = int(model.max_seq_len - args.max_new_tokens)
@@ -358,6 +374,8 @@ def main() -> None:
     batch_request_ids: List[int] = []
     batch_prefix_infos: List[ds_trace.RequestPrefixInfo] = []
     next_request_id = 0
+    n_samples_seen = 0
+    n_skipped_long = 0
 
     def _flush_batch() -> None:
         nonlocal batch_prompt_tokens, batch_request_ids, batch_prefix_infos
@@ -379,8 +397,9 @@ def main() -> None:
     system_prompt = (args.chat_system_prompt or "").strip()
 
     def _enqueue_request(prompt_toks: List[int]) -> None:
-        nonlocal next_request_id
+        nonlocal next_request_id, n_skipped_long
         if len(prompt_toks) > max_prompt_tokens:
+            n_skipped_long += 1
             return
         pinfo = prefix_analyzer.analyze_prompt_tokens(prompt_toks, kv_block_size_tokens=int(args.kv_block_size))
         batch_prompt_tokens.append(prompt_toks)
@@ -390,10 +409,21 @@ def main() -> None:
         if len(batch_prompt_tokens) >= int(args.batch_size):
             _flush_batch()
 
+    def _print_progress() -> None:
+        label = f"[progress] samples={n_samples_seen}"
+        if selected_size is not None:
+            label += f"/{selected_size}"
+        label += f"  requests={next_request_id}  skipped_long={n_skipped_long}"
+        sys.stderr.write(f"\r{label}")
+        sys.stderr.flush()
+
     if args.dataset == "sharegpt" and args.limit > 0 and not hasattr(ds_iter, "select"):
         ds_iter = itertools.islice(ds_iter, int(args.limit))
 
     for ex in ds_iter:
+        n_samples_seen += 1
+        if n_samples_seen % 1 == 0:
+            _print_progress()
         if args.dataset == "sharegpt":
             messages = _sharegpt_messages(ex)
             if system_prompt:
@@ -417,6 +447,8 @@ def main() -> None:
             ptoks = tokenizer.apply_chat_template(msgs, add_generation_prompt=True)
             _enqueue_request(ptoks)
     _flush_batch()
+    sys.stderr.write("\n")
+    print(f"[done] samples_seen={n_samples_seen}  requests_generated={next_request_id}  skipped_too_long={n_skipped_long}")
 
     if rank == 0:
         summary_path = os.path.join(trace_out, "summary.json")
