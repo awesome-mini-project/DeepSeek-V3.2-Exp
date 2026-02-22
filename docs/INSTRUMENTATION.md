@@ -542,7 +542,19 @@ DATA=full GEN=full ./scripts/run_all_traces.sh
 | `default` | `full` | 64 | 直到 EOS | 观察自然生成长度下的 DSA 行为 |
 | `full` | `full` | 全部 | 直到 EOS | exhaustive（trace 很大） |
 
-向后兼容：`MODE=smoke/default/full` 仍然可用（等价于 DATA 和 GEN 同时设置）。
+向后兼容：`MODE=smoke/default/full` 仍然可用（当 `DATA` 和 `GEN` 未显式设置时，从 `MODE` 推导）。
+
+**错误处理**：
+
+- 如果 `DATA` 或 `GEN` 传了不合法的值（如 `GEN=smoke`），脚本会**立刻报错退出**
+- 默认情况下某个数据集 CUDA 崩溃（OOM / assert）后，**后续数据集不会再跑**
+- 设 `CONTINUE_ON_ERROR=1` 可以跳过失败的数据集继续跑剩余的：
+
+```bash
+CONTINUE_ON_ERROR=1 ./scripts/run_all_traces.sh
+```
+
+脚本结束时会打印哪些数据集失败了。
 
 也可以**单独跑某个数据集**（在仓库根目录）：
 
