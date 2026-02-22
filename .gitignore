@@ -6,5 +6,6 @@ __pycache__/
 outputs/
 data/
 logs/
+local/
 
 .DS_Store
