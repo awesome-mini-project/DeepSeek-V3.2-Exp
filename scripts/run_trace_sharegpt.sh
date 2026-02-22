@@ -44,6 +44,7 @@ OUT_DIR="${ROOT_DIR}/outputs/sharegpt_$(date +%s)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 SHAREGPT_JSON="${SHAREGPT_JSON:-}"
 SHAREGPT_DATASET="${SHAREGPT_DATASET:-anon8231489123/ShareGPT_Vicuna_unfiltered}"
+SHAREGPT_HF_FILE="${SHAREGPT_HF_FILE:-ShareGPT_V3_unfiltered_cleaned_split.json}"
 TURN_MODE="${TURN_MODE:-full}"
 
 SCRIPT="${ROOT_DIR}/inference/run_dataset.py"
@@ -58,6 +59,7 @@ ARGS=(
   --max-new-tokens "${MAX_NEW_TOKENS}"
   --trace-out "${OUT_DIR}"
   --sharegpt-turn-mode "${TURN_MODE}"
+  --sharegpt-hf-file "${SHAREGPT_HF_FILE}"
 )
 
 if [[ -n "${SHAREGPT_JSON}" ]]; then

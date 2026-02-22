@@ -4,11 +4,13 @@ import time
 from argparse import ArgumentParser
 from pathlib import Path
 import tarfile
+import itertools
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
 import torch.distributed as dist
 from datasets import load_dataset
+from datasets.exceptions import DataFilesNotFoundError
 from huggingface_hub import hf_hub_download
 from transformers import AutoTokenizer
 from safetensors.torch import load_model
@@ -104,6 +106,14 @@ def _prepare_ruler_dataset(split: str, tgz_name: str) -> List[str]:
             cand = split_hits
 
     return sorted(cand)
+
+
+def _prepare_sharegpt_json_file(repo_id: str, filename: str) -> str:
+    """
+    Download a ShareGPT-style JSON file from a dataset repo to local cache and return its path.
+    This is used as a robust fallback when `load_dataset(repo_id)` can't infer data files.
+    """
+    return hf_hub_download(repo_id=repo_id, filename=filename, repo_type="dataset")
 
 
 def _ruler_prompt_from_raw(ex: Dict[str, Any]) -> str:
@@ -248,6 +258,7 @@ def main() -> None:
     parser.add_argument("--chat-system-prompt", type=str, default="")
     parser.add_argument("--sharegpt-json", type=str, default="")
     parser.add_argument("--sharegpt-dataset", type=str, default="anon8231489123/ShareGPT_Vicuna_unfiltered")
+    parser.add_argument("--sharegpt-hf-file", type=str, default="ShareGPT_V3_unfiltered_cleaned_split.json")
     parser.add_argument("--sharegpt-turn-mode", type=str, default="full", choices=["full", "per_user_turn"])
     parser.add_argument("--ruler-tgz", type=str, default="data_debug.tgz", choices=["data_debug.tgz", "data_100_samples.tgz"])
     parser.add_argument("--seed", type=int, default=0)
@@ -312,12 +323,28 @@ def main() -> None:
         ds_iter = ds
     else:
         if args.sharegpt_json:
-            ds = load_dataset("json", data_files=args.sharegpt_json, split="train")
+            # Local JSON file; stream to avoid loading everything into memory.
+            ds_iter = load_dataset("json", data_files=args.sharegpt_json, split="train", streaming=True)
         else:
-            ds = load_dataset(args.sharegpt_dataset, split=args.split)
-        if args.limit > 0:
-            ds = ds.select(range(min(args.limit, len(ds))))
-        ds_iter = ds
+            try:
+                ds = load_dataset(args.sharegpt_dataset, split=args.split)
+                if args.limit > 0:
+                    ds = ds.select(range(min(args.limit, len(ds))))
+                ds_iter = ds
+            except DataFilesNotFoundError:
+                # Fallback: download an explicit JSON file and stream-load it.
+                if rank == 0:
+                    sharegpt_path = _prepare_sharegpt_json_file(args.sharegpt_dataset, args.sharegpt_hf_file)
+                else:
+                    sharegpt_path = ""
+                if world_size > 1 and dist.is_initialized():
+                    obj_list = [sharegpt_path]
+                    dist.broadcast_object_list(obj_list, src=0)
+                    sharegpt_path = obj_list[0]
+                    dist.barrier()
+                if not sharegpt_path:
+                    raise RuntimeError("ShareGPT fallback download failed; please provide --sharegpt-json.")
+                ds_iter = load_dataset("json", data_files=sharegpt_path, split="train", streaming=True)
 
     max_prompt_tokens = int(args.max_prompt_tokens)
     if max_prompt_tokens <= 0:
@@ -358,6 +385,9 @@ def main() -> None:
         next_request_id += 1
         if len(batch_prompt_tokens) >= int(args.batch_size):
             _flush_batch()
+
+    if args.dataset == "sharegpt" and args.limit > 0 and not hasattr(ds_iter, "select"):
+        ds_iter = itertools.islice(ds_iter, int(args.limit))
 
     for ex in ds_iter:
         if args.dataset == "sharegpt":

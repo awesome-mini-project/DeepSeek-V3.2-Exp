@@ -177,6 +177,7 @@ export BURSTGPT_CSV="data/burstgpt/burstgpt_train_limit2000.csv"
 - 默认 HF：`anon8231489123/ShareGPT_Vicuna_unfiltered`
 - 也支持你提供 **ShareGPT JSON 文件**：
   - 用法：`--sharegpt-json /path/to/sharegpt.json`
+  - 以及一个兜底：当某些环境下 `load_dataset(sharegpt_dataset_id)` 识别不到数据文件时，会自动下载 `--sharegpt-hf-file` 指定的 JSON 并用 `load_dataset("json", ..., streaming=True)` 读取。
 
 导出 JSONL（HF→本地）：
 
