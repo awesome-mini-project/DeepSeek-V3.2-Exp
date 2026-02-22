@@ -474,13 +474,89 @@ cat "$OUT/summary.json" | python3 -m json.tool
 | `--limit` | 64 | 数据集样本数上限 |
 | `--max-new-tokens` | 64/32 | 每条样本最多生成的 token 数 |
 | `--max-prompt-tokens` | 16384 | 超过此长度的 prompt 跳过（防 prefill OOM） |
-| `--batch-size` | 1 | 每批同时推理的 request 数 |
+| `--batch-size` | 1 | 每批同时推理的 request 数（若 > config `max_batch_size`，runner 会自动扩大预分配） |
+| `--temperature` | 0.6 | 采样温度（0 = greedy argmax，完全确定性） |
 | `--ruler-tgz` | data_debug.tgz | RULER 包选择（或 data_100_samples.tgz） |
 | `--sharegpt-turn-mode` | full | ShareGPT 多轮模式（full / per_user_turn） |
 
 ---
 
-## 9. Trace 数据解读：第一条记录为何从 `step_idx=3743` 开始
+## 9. 运行可复现性与参数选择
+
+### 9.1 数据集会每次重新下载吗？
+
+**不会。** HuggingFace `load_dataset()` / `hf_hub_download()` 首次下载后缓存在 `data/huggingface/` 下，
+之后直接复用。RULER 的 tgz 解压也有 marker 文件（`.extracted.ok`）防止重复解压。
+数据集内容在多次运行之间**完全不变**。
+
+### 9.2 每次跑 trace 结果一样吗？
+
+**不完全一样。** 原因是 `temperature=0.6`（默认）时采样有随机性：
+
+- `generate()` 里的 `sample()` 用 `exponential_()` 随机采样 → 每次生成的 token 不同
+- 不同的生成 token → decode 阶段 KV cache 内容不同 → DSA indexer 选出的 top-2048 也不同
+- 多卡 NCCL 通信时序也可能引入微小的非确定性
+
+**如何获得完全可复现的 trace：**
+
+```bash
+# greedy decoding，完全确定性
+TEMPERATURE=0 ./scripts/run_trace_ruler.sh
+```
+
+**对系统论文分析来说，不需要完全可复现。** 你关心的是 DSA 的访问模式分布
+（unique_blocks、offset、tokens_per_block 等统计特性），这些在多次运行间是**稳定**的。
+temperature 带来的随机性不影响分布的趋势和结论。
+
+### 9.3 `--limit 64` 是否太少？
+
+**对初步分析足够。** 算一笔账：
+
+- 64 条样本 × 64 decode steps × 61 layers = **~250K 条 trace 记录**
+- 每条记录包含 `selected_token_pos[2048]`、`selected_block_ids`、offset 统计等
+- 这已经足够做 unique_blocks / tokens_per_block / offset 的分布统计
+
+如果要更大规模统计（例如画 CDF 图、跨任务类型对比），可以调大：
+
+```bash
+LIMIT=256 MAX_NEW_TOKENS=128 ./scripts/run_trace_ruler.sh
+```
+
+### 9.4 `--max-prompt-tokens 16384` 是否太短？
+
+**这是当前 demo 的安全上限**（受 prefill dense O(S^2) 限制）。
+对于 trace 采集来说，16K 的 prompt + 64 的 decode 已经能展示 DSA 的"非局部选择"行为——
+因为 DSA 是在 decode 阶段对**全部已有 token**（最多 16K+64）做 top-2048 选择。
+
+如需更长 prompt 的 trace，需切换到 vLLM/SGLang（它们的 DSA prefill 是真正的 O(S x k) 稀疏）。
+
+### 9.5 ShareGPT 多轮对话不需要全跑完？
+
+**不需要。** 两种模式各有用途：
+
+- `--sharegpt-turn-mode full`：整段对话作为一个 request。适合看"长对话历史下 DSA 选了哪些 token"
+- `--sharegpt-turn-mode per_user_turn`：每个 user turn 作为独立 request。适合看"prefix cache 复用率"
+
+对于系统论文的分析，你主要关心：
+1. DSA 的 token/block 访问分布 → `full` 模式即可
+2. prefix 共享前缀的复用率 → `per_user_turn` 模式更有价值
+
+64 条对话在 `per_user_turn` 模式下会展开成 ~200 个 request，每个 request 的 decode 阶段都会产出 trace。
+这对于回答"DSA 是否频繁触达共享前缀块"已经足够。
+
+### 9.6 `--batch-size` 与 `max_batch_size` 的关系
+
+- `config_671B_v3.2.json` 里的 `max_batch_size` 控制 **KV cache 预分配**
+- `--batch-size` 控制 **运行时每批送几条 request**
+- **现在 runner 会自动写通**：如果 `--batch-size > config.max_batch_size`，会自动扩大预分配
+
+当前默认 `max_batch_size=1`（config）和 `--batch-size 1`（runner）是匹配的。
+如果你想批量跑（例如 `--batch-size 4`），runner 会自动把 `max_batch_size` 调到 4
+（代价是 KV cache 预分配 x4，占更多显存）。
+
+---
+
+## 10. Trace 数据解读：第一条记录为何从 `step_idx=3743` 开始
 
 ### 9.1 核心结论
 

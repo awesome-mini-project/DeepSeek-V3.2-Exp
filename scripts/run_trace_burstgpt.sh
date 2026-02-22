@@ -14,6 +14,7 @@ set -euo pipefail
 # - BATCH_SIZE (default: 1)
 # - KV_BLOCK_SIZE (default: 16)
 # - MAX_NEW_TOKENS_CAP (default: 64)
+# - TEMPERATURE (default: 0.6; run_burstgpt.py uses hardcoded 0.6, env var for docs only)
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CKPT_PATH="${CKPT_PATH:?Please set CKPT_PATH}"
@@ -24,6 +25,7 @@ LIMIT="${LIMIT:-256}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 KV_BLOCK_SIZE="${KV_BLOCK_SIZE:-16}"
 MAX_NEW_TOKENS_CAP="${MAX_NEW_TOKENS_CAP:-64}"
+TEMPERATURE="${TEMPERATURE:-0.6}"
 
 # Force HuggingFace caches to live under the repo (avoid ~/.cache/huggingface).
 DATA_ROOT="${DATAS_DIR:-${DATA_ROOT:-${ROOT_DIR}/data}}"

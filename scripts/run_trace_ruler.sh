@@ -25,6 +25,7 @@ BATCH_SIZE="${BATCH_SIZE:-1}"
 KV_BLOCK_SIZE="${KV_BLOCK_SIZE:-16}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-64}"
 MAX_PROMPT_TOKENS="${MAX_PROMPT_TOKENS:-16384}"
+TEMPERATURE="${TEMPERATURE:-0.6}"
 RULER_TGZ="${RULER_TGZ:-data_debug.tgz}"
 
 # Force HuggingFace caches to live under the repo (avoid ~/.cache/huggingface).
@@ -59,6 +60,7 @@ ARGS=(
   --kv-block-size "${KV_BLOCK_SIZE}"
   --max-new-tokens "${MAX_NEW_TOKENS}"
   --max-prompt-tokens "${MAX_PROMPT_TOKENS}"
+  --temperature "${TEMPERATURE}"
   --trace-out "${OUT_DIR}"
 )
 

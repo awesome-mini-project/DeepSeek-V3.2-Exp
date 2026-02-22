@@ -14,6 +14,7 @@ set -euo pipefail
 # - KV_BLOCK_SIZE (default: 16)
 # - MAX_NEW_TOKENS (default: 64)
 # - MAX_PROMPT_TOKENS: skip prompts longer than this (default: 16384; prefill is dense O(S^2))
+# - TEMPERATURE (default: 0.6)
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CKPT_PATH="${CKPT_PATH:?Please set CKPT_PATH}"
@@ -24,6 +25,7 @@ BATCH_SIZE="${BATCH_SIZE:-1}"
 KV_BLOCK_SIZE="${KV_BLOCK_SIZE:-16}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-64}"
 MAX_PROMPT_TOKENS="${MAX_PROMPT_TOKENS:-16384}"
+TEMPERATURE="${TEMPERATURE:-0.6}"
 
 # Force HuggingFace caches to live under the repo (avoid ~/.cache/huggingface).
 DATA_ROOT="${DATAS_DIR:-${DATA_ROOT:-${ROOT_DIR}/data}}"
@@ -60,6 +62,7 @@ ARGS=(
   --kv-block-size "${KV_BLOCK_SIZE}"
   --max-new-tokens "${MAX_NEW_TOKENS}"
   --max-prompt-tokens "${MAX_PROMPT_TOKENS}"
+  --temperature "${TEMPERATURE}"
   --trace-out "${OUT_DIR}"
   --sharegpt-turn-mode "${TURN_MODE}"
   --sharegpt-hf-file "${SHAREGPT_HF_FILE}"

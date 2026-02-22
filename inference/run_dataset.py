@@ -275,6 +275,10 @@ def main() -> None:
 
     with open(args.config) as f:
         margs = ModelArgs(**json.load(f))
+    if int(args.batch_size) > margs.max_batch_size:
+        margs.max_batch_size = int(args.batch_size)
+        if rank == 0:
+            print(f"[warn] --batch-size ({args.batch_size}) > config max_batch_size; overriding to {args.batch_size}")
     with torch.device("cuda"):
         model = Transformer(margs)
     tokenizer = AutoTokenizer.from_pretrained(args.ckpt_path)
