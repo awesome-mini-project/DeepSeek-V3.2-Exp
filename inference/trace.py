@@ -79,7 +79,7 @@ class TraceConfig:
     rank0_only: bool = True
     sync_cuda_for_timing: bool = True
     prefix_cache_key_tokens: int = 256
-    max_records_per_file: int = 0  # 0 means no split
+    max_requests_per_file: int = 10  # shard JSONL every N requests; 0 = no split
 
     @staticmethod
     def from_env() -> "TraceConfig":
@@ -121,7 +121,7 @@ class TraceConfig:
             rank0_only=_get_bool("DS_TRACE_RANK0_ONLY", True),
             sync_cuda_for_timing=_get_bool("DS_TRACE_SYNC_CUDA", True),
             prefix_cache_key_tokens=_get_int("DS_TRACE_PREFIX_KEY_TOKENS", 256),
-            max_records_per_file=_get_int("DS_TRACE_MAX_RECORDS_PER_FILE", 0),
+            max_requests_per_file=_get_int("DS_TRACE_MAX_REQUESTS_PER_FILE", 10),
         )
 
 
@@ -184,36 +184,63 @@ class PrefixCacheAnalyzer:
 
 
 class TraceWriter:
-    def __init__(self, out_dir: str, filename: str = "trace_steps.jsonl", max_records_per_file: int = 0):
+    """
+    Writes JSONL trace records, with optional sharding by request count.
+
+    When max_requests_per_file > 0, a new file is created every N requests.
+    File naming: trace_steps_req{start}_req{end}.jsonl
+    """
+
+    def __init__(self, out_dir: str, filename: str = "trace_steps.jsonl", max_requests_per_file: int = 10):
         self.out_dir = Path(out_dir)
         _ensure_dir(self.out_dir)
         self.filename = filename
-        self.max_records_per_file = int(max_records_per_file)
+        self.max_requests_per_file = int(max_requests_per_file)
         self._fh = None
-        self._records_in_file = 0
         self._total_records = 0
-        self._file_start = 0
+        self._cur_req_start = 0
+        self._cur_req_end = 0
+        self._seen_requests: set = set()
+        self._requests_in_file = 0
+
+    def _shard_path(self, start: int, end: int) -> Path:
+        stem = Path(self.filename).stem
+        suffix = Path(self.filename).suffix
+        return self.out_dir / f"{stem}_req{start}_req{end}{suffix}"
 
     def _open_if_needed(self) -> None:
         if self._fh is not None:
             return
-        path = self.out_dir / self.filename
-        if self.max_records_per_file > 0:
-            stem = Path(self.filename).stem
-            suffix = Path(self.filename).suffix
-            path = self.out_dir / f"{stem}_{self._file_start}_{self._file_start + self.max_records_per_file}{suffix}"
+        if self.max_requests_per_file > 0:
+            path = self._shard_path(self._cur_req_start, self._cur_req_start + self.max_requests_per_file)
+        else:
+            path = self.out_dir / self.filename
         self._fh = open(path, "a", encoding="utf-8")
 
     def write(self, rec: Dict[str, Any]) -> None:
         self._open_if_needed()
         self._fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        self._records_in_file += 1
         self._total_records += 1
-        if self.max_records_per_file > 0 and self._records_in_file >= self.max_records_per_file:
+
+        req_id = rec.get("request_id")
+        if req_id is not None and req_id not in self._seen_requests:
+            self._seen_requests.add(req_id)
+            self._requests_in_file += 1
+            self._cur_req_end = int(req_id) + 1
+
+        if self.max_requests_per_file > 0 and self._requests_in_file >= self.max_requests_per_file:
+            self._rotate_file()
+
+    def _rotate_file(self) -> None:
+        if self._fh is not None:
+            old_path = self._shard_path(self._cur_req_start, self._cur_req_start + self.max_requests_per_file)
+            new_path = self._shard_path(self._cur_req_start, self._cur_req_end)
             self._fh.close()
             self._fh = None
-            self._file_start = self._total_records
-            self._records_in_file = 0
+            if old_path.exists() and old_path != new_path:
+                old_path.rename(new_path)
+            self._cur_req_start = self._cur_req_end
+            self._requests_in_file = 0
 
     @property
     def total_records(self) -> int:
@@ -221,16 +248,17 @@ class TraceWriter:
 
     def close(self) -> None:
         if self._fh is not None:
-            if self.max_records_per_file > 0 and self._records_in_file > 0:
-                old_path = self.out_dir / f"{Path(self.filename).stem}_{self._file_start}_{self._file_start + self.max_records_per_file}{Path(self.filename).suffix}"
-                new_path = self.out_dir / f"{Path(self.filename).stem}_{self._file_start}_{self._total_records}{Path(self.filename).suffix}"
+            if self.max_requests_per_file > 0 and self._requests_in_file > 0:
+                old_path = self._shard_path(self._cur_req_start, self._cur_req_start + self.max_requests_per_file)
+                new_path = self._shard_path(self._cur_req_start, self._cur_req_end)
                 self._fh.close()
                 self._fh = None
                 if old_path.exists() and old_path != new_path:
                     old_path.rename(new_path)
             else:
-                self._fh.close()
-                self._fh = None
+                if self._fh is not None:
+                    self._fh.close()
+                    self._fh = None
 
 
 @dataclass
@@ -269,7 +297,7 @@ class Tracer:
         self.cfg = cfg
         trace_dir = str(Path(cfg.out_dir) / f"block{cfg.kv_block_size_tokens}")
         self.trace_dir = trace_dir
-        self.writer = TraceWriter(trace_dir, max_records_per_file=cfg.max_records_per_file)
+        self.writer = TraceWriter(trace_dir, max_requests_per_file=cfg.max_requests_per_file)
         self.ctx = TraceContext()
         self._unique_blocks = _DistributionSummary()
         self._tokens_per_block = _DistributionSummary()

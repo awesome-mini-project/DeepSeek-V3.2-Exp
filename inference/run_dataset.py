@@ -255,7 +255,7 @@ def main() -> None:
     parser.add_argument("--trace-sample-rate", type=float, default=1.0)
     parser.add_argument("--trace-prefix-key-tokens", type=int, default=256)
     parser.add_argument("--trace-no-sync-cuda", action="store_true")
-    parser.add_argument("--max-records-per-file", type=int, default=10000)
+    parser.add_argument("--max-requests-per-file", type=int, default=10)
     parser.add_argument("--max-prompt-tokens", type=int, default=0)
     parser.add_argument("--chat-system-prompt", type=str, default="")
     parser.add_argument("--sharegpt-json", type=str, default="")
@@ -297,7 +297,7 @@ def main() -> None:
         rank0_only=True,
         sync_cuda_for_timing=not bool(args.trace_no_sync_cuda),
         prefix_cache_key_tokens=int(args.trace_prefix_key_tokens),
-        max_records_per_file=int(args.max_records_per_file),
+        max_requests_per_file=int(args.max_requests_per_file),
     )
     tracer = ds_trace.init_tracer(cfg)
     tracer.set_run_meta(run_name=os.path.basename(trace_out.rstrip("/")), dataset=args.dataset)

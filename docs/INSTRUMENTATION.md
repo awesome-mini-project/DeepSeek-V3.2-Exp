@@ -238,16 +238,17 @@ trace 文件会写到 `--trace-out` 下按 block size 命名的子目录里：
 
 ```
 outputs/ruler_1771772829/
-└── block64/                          ← kv-block-size=64 的 trace
-    ├── trace_steps_0_10000.jsonl     ← 第 0~9999 条记录
-    ├── trace_steps_10000_20000.jsonl ← 第 10000~19999 条记录
-    ├── trace_steps_20000_23456.jsonl ← 第 20000~23455 条（最后一片，实际行数）
+└── block64/                               ← kv-block-size=64 的 trace
+    ├── trace_steps_req0_req10.jsonl       ← request 0~9 的全部 trace（所有 layer × 所有 step）
+    ├── trace_steps_req10_req20.jsonl      ← request 10~19
+    ├── trace_steps_req20_req27.jsonl      ← request 20~26（最后一片，实际 request 数）
     └── summary.json
 ```
 
 - 子目录名 `block64` 来自 `--kv-block-size 64`，你可以用不同 block size 跑多次，结果会在不同子目录并排存放
-- JSONL 文件名包含 `{start}_{end}` 表示记录编号范围（从文件名就能看出跑了多少条）
-- 分片大小由 `--max-records-per-file` 控制（默认 10000；设 0 不分片，全写一个文件）
+- **JSONL 按 request 数分片**（不是按记录数）：每个 request 的所有 decode step × 所有 layer 的 trace 保证在同一片里
+- 文件名 `req{start}_req{end}` 表示 request ID 范围（从文件名就能看出跑了多少条 request）
+- 分片大小由 `--max-requests-per-file` 控制（默认 10；设 0 不分片，全写一个文件）
 
 ```
 outputs/ruler_1771772829/
@@ -547,7 +548,7 @@ cat "$OUT/summary.json" | python3 -m json.tool
 | `--max-new-tokens` | 64/32 | 每条样本最多生成的 token 数 |
 | `--max-prompt-tokens` | 16384 | 超过此长度的 prompt 跳过（防 prefill OOM） |
 | `--max-new-tokens` | 64 | 每条样本最多生成 token 数；**设 0 = 直到 EOS 或 max_seq_len** |
-| `--max-records-per-file` | 10000 | JSONL 分片：每 N 条记录换一个文件（0 = 不分片） |
+| `--max-requests-per-file` | 10 | JSONL 按 request 数分片：每 10 个 request 换一个文件（0 = 不分片） |
 | `--batch-size` | 1 | 每批同时推理的 request 数（若 > config `max_batch_size`，runner 会自动扩大预分配） |
 | `--temperature` | 0.6 | 采样温度（0 = greedy argmax，完全确定性） |
 | `--ruler-tgz` | data_debug.tgz | RULER 包选择（或 data_100_samples.tgz） |
