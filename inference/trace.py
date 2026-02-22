@@ -72,7 +72,7 @@ def _sha1_ints(ints: Sequence[int]) -> str:
 class TraceConfig:
     enabled: bool = False
     out_dir: str = ""
-    kv_block_size_tokens: int = 16
+    kv_block_size_tokens: int = 64
     store_scores_topk: bool = False
     store_selected_token_pos: bool = True
     sample_rate: float = 1.0
@@ -114,7 +114,7 @@ class TraceConfig:
         return TraceConfig(
             enabled=enabled,
             out_dir=out_dir,
-            kv_block_size_tokens=_get_int("DS_TRACE_KV_BLOCK_SIZE", 16),
+            kv_block_size_tokens=_get_int("DS_TRACE_KV_BLOCK_SIZE", 64),
             store_scores_topk=_get_bool("DS_TRACE_STORE_SCORES", False),
             store_selected_token_pos=_get_bool("DS_TRACE_STORE_TOKEN_POS", True),
             sample_rate=_get_float("DS_TRACE_SAMPLE_RATE", 1.0),

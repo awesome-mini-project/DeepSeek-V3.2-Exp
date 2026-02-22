@@ -248,7 +248,7 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--trace-enable", action="store_true")
     parser.add_argument("--trace-out", type=str, default="")
-    parser.add_argument("--kv-block-size", type=int, default=16)
+    parser.add_argument("--kv-block-size", type=int, default=64)
     parser.add_argument("--trace-store-scores", action="store_true")
     parser.add_argument("--trace-sample-rate", type=float, default=1.0)
     parser.add_argument("--trace-prefix-key-tokens", type=int, default=256)

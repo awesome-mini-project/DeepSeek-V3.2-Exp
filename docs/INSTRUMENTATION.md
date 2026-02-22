@@ -117,7 +117,7 @@ KV cache 显存开销（bsz=1）：
 
 | 字段 | 说明 |
 |---|---|
-| `block_size_tokens` | 逻辑 block 大小（由 `--kv-block-size` 控制，默认 16） |
+| `block_size_tokens` | 逻辑 block 大小（由 `--kv-block-size` 控制，默认 64，对齐 vLLM） |
 | `selected_block_ids` | 去重后的 block ID 列表 |
 | `unique_blocks` | `\|B_t\|`（去重 block 数） |
 | `total_blocks_in_use` | 当前序列实际占用的总 block 数（= `ceil(end_pos / block_size)`） |
@@ -438,7 +438,7 @@ torchrun --nproc-per-node 8 generate.py \
   --interactive \
   --trace-enable \
   --trace-out "../outputs/interactive_trace_$(date +%s)" \
-  --kv-block-size 16
+  --kv-block-size 64
 ```
 
 ### 8.4 关于 `--kv-block-size`（逻辑块大小）
@@ -446,28 +446,32 @@ torchrun --nproc-per-node 8 generate.py \
 `--kv-block-size` 决定了 trace 里 **token→block 映射的粒度**（`block_id = token_pos // kv_block_size`）。
 它不影响模型推理本身（demo 没有真实 PagedAttention），只影响 trace 里 block 级别的统计。
 
-**怎么选值？**
+**默认值 64（对齐 vLLM 官方配置）**：
 
-- **对齐你后续要接入的 PagedAttention block size**：vLLM 对 DeepSeek V3.2 使用 block_size=64（FlashMLA 要求）；通用 vLLM 默认 16
-- 值越小 → `unique_blocks` 越大、`touched_block_ratio` 越高（细粒度，但 block 数多）
-- 值越大 → `unique_blocks` 越少、`tokens_per_touched_block` 越大（粗粒度，更接近真实 paged KV）
+根据 vLLM 官方博文和 recipe（[vLLM Blog: DeepSeek-V3.2-Exp](https://blog.vllm.ai/2025/09/29/deepseek-v3-2.html)）：
 
-**推荐值**：
+> "This is one of the reasons we **only support block size 64** for this model;
+> the other being that FlashMLA is tailored to it as well."
 
-| 场景 | 建议 block_size | 原因 |
+vLLM 对 DeepSeek V3.2/V3.2-Exp **固定使用 block_size=64**，原因是：
+1. **Indexer key cache** 按 per-block 方式存储（block_size x head_dim 的 FP8 值 + 逐 block scale）
+2. **FlashMLA sparse attention kernel** 专门为 block_size=64 优化
+
+因此我们的默认值也设为 64，使 trace 里的 block 级统计可以**直接对齐 vLLM 的真实 block 划分**。
+
+**其他值（按需调整）**：
+
+| 场景 | block_size | 说明 |
 |---|---|---|
-| 对齐 vLLM + FlashMLA (DeepSeek V3.2) | **64** | vLLM 官方对此模型只支持 block_size=64 |
-| 通用 PagedAttention 分析 | **16** | vLLM 默认 block size |
-| 更细粒度的 subblock 分析 | **8** 或 **4** | 为 MemFabric subblock packing 做数据准备 |
+| **对齐 vLLM（默认）** | **64** | trace 里的 block 映射与 vLLM serving 完全一致 |
+| 通用 PagedAttention 分析 | 16 | vLLM 对其他模型的默认 block size |
+| 细粒度 subblock 分析 | 8 或 4 | 为 MemFabric subblock packing 做数据准备 |
 
 **设置方法**（所有脚本都支持 `KV_BLOCK_SIZE` 环境变量）：
 
 ```bash
-# 默认 16
+# 默认 64（对齐 vLLM）
 ./scripts/run_trace_ruler.sh
-
-# 对齐 vLLM FlashMLA
-KV_BLOCK_SIZE=64 ./scripts/run_trace_ruler.sh
 
 # 细粒度 subblock
 KV_BLOCK_SIZE=4 ./scripts/run_trace_ruler.sh
@@ -520,7 +524,7 @@ cat "$OUT/summary.json" | python3 -m json.tool
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--kv-block-size` | 16 | 逻辑 block 大小（token 数）；见上方 8.4 节详细说明 |
+| `--kv-block-size` | **64** | 逻辑 block 大小（token 数）；对齐 vLLM FlashMLA；见 8.4 节 |
 | `--trace-store-scores` | 关 | 开启后写全部 2048 分数（日志很大） |
 | `--trace-sample-rate` | 1.0 | step 采样率（0.1 = 10%） |
 | `--trace-prefix-key-tokens` | 256 | prefix hash 最大 token 数 |
