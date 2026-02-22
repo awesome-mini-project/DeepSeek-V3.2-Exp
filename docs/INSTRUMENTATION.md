@@ -238,23 +238,17 @@ trace 文件会写到 `--trace-out` 下按 block size 命名的子目录里：
 
 ```
 outputs/ruler_1771772829/
-└── block64/                               ← kv-block-size=64 的 trace
-    ├── trace_steps_req0_req10.jsonl       ← request 0~9 的全部 trace（所有 layer × 所有 step）
-    ├── trace_steps_req10_req20.jsonl      ← request 10~19
-    ├── trace_steps_req20_req27.jsonl      ← request 20~26（最后一片，实际 request 数）
+└── block64/                            ← kv-block-size=64 的 trace
+    ├── trace_steps_0_10.jsonl         ← request 0~9 的全部 trace（所有 layer × 所有 step）
+    ├── trace_steps_10_20.jsonl        ← request 10~19
+    ├── trace_steps_20_27.jsonl        ← request 20~26（最后一片，实际 request 数）
     └── summary.json
 ```
 
 - 子目录名 `block64` 来自 `--kv-block-size 64`，你可以用不同 block size 跑多次，结果会在不同子目录并排存放
 - **JSONL 按 request 数分片**（不是按记录数）：每个 request 的所有 decode step × 所有 layer 的 trace 保证在同一片里
-- 文件名 `req{start}_req{end}` 表示 request ID 范围（从文件名就能看出跑了多少条 request）
+- 文件名 `{start}_{end}` 表示 request ID 范围（从文件名就能看出跑了多少条 request）
 - 分片大小由 `--max-requests-per-file` 控制（默认 10；设 0 不分片，全写一个文件）
-
-```
-outputs/ruler_1771772829/
-├── trace_steps.jsonl    # 逐 step 逐 layer 的 DSA 轨迹（核心产物）
-└── summary.json         # 汇总统计
-```
 
 ### 5.2 `trace_steps.jsonl` 每行 schema
 
@@ -366,6 +360,18 @@ outputs/ruler_1771772829/
 | **本项目处理** | 建议先用 `LIMIT=2000 ./scripts/datasets/download_burstgpt.sh` 导出小 CSV |
 | **runner 行为** | `run_burstgpt.py` 按 CSV 里的 timestamp 模拟 FIFO 到达+批处理，用合成 prompt（token 长度按 `Request tokens` 填充） |
 | **额外输出** | `summary.json` 里包含 `serving.latency_ms{p50,p95,p99,max}` |
+
+**BurstGPT 是什么？** 它不是一个"prompt 文本数据集"，而是从 Azure OpenAI 服务采集的**真实请求到达轨迹**——
+记录的是"什么时间到了一条多长的请求"（Timestamp + Request tokens + Response tokens），不包含 prompt 文本内容。
+其他三个数据集关注单条请求的 DSA 访问模式；BurstGPT 关注的是**多条请求并发/突发到达时系统层面的行为**（排队、尾延迟、burst 等），
+这些是做"距离感知放置/迁移/副本"策略设计的必要输入。
+
+**`LIMIT=2000` 是什么意思？** BurstGPT 全量有 1031 万条 trace。`LIMIT=2000` 告诉 `download_burstgpt.sh` 只导出前 2000 条到 CSV。
+然后 `run_trace_burstgpt.sh` 的 `--limit 256` 又从中取前 256 条来跑模拟。完整链路：
+
+```
+HuggingFace (10.31M 条) → LIMIT=2000 → CSV (2000 条) → --limit 256 → 实际模拟 (256 条)
+```
 
 ---
 

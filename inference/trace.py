@@ -188,7 +188,7 @@ class TraceWriter:
     Writes JSONL trace records, with optional sharding by request count.
 
     When max_requests_per_file > 0, a new file is created every N requests.
-    File naming: trace_steps_req{start}_req{end}.jsonl
+    File naming: trace_steps_{start}_{end}.jsonl (start/end are request IDs)
     """
 
     def __init__(self, out_dir: str, filename: str = "trace_steps.jsonl", max_requests_per_file: int = 10):
@@ -206,7 +206,7 @@ class TraceWriter:
     def _shard_path(self, start: int, end: int) -> Path:
         stem = Path(self.filename).stem
         suffix = Path(self.filename).suffix
-        return self.out_dir / f"{stem}_req{start}_req{end}{suffix}"
+        return self.out_dir / f"{stem}_{start}_{end}{suffix}"
 
     def _open_if_needed(self) -> None:
         if self._fh is not None:
