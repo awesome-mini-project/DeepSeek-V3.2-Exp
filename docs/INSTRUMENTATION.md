@@ -441,7 +441,46 @@ torchrun --nproc-per-node 8 generate.py \
   --kv-block-size 16
 ```
 
-### 8.4 四类 workload 跑数
+### 8.4 关于 `--kv-block-size`（逻辑块大小）
+
+`--kv-block-size` 决定了 trace 里 **token→block 映射的粒度**（`block_id = token_pos // kv_block_size`）。
+它不影响模型推理本身（demo 没有真实 PagedAttention），只影响 trace 里 block 级别的统计。
+
+**怎么选值？**
+
+- **对齐你后续要接入的 PagedAttention block size**：vLLM 对 DeepSeek V3.2 使用 block_size=64（FlashMLA 要求）；通用 vLLM 默认 16
+- 值越小 → `unique_blocks` 越大、`touched_block_ratio` 越高（细粒度，但 block 数多）
+- 值越大 → `unique_blocks` 越少、`tokens_per_touched_block` 越大（粗粒度，更接近真实 paged KV）
+
+**推荐值**：
+
+| 场景 | 建议 block_size | 原因 |
+|---|---|---|
+| 对齐 vLLM + FlashMLA (DeepSeek V3.2) | **64** | vLLM 官方对此模型只支持 block_size=64 |
+| 通用 PagedAttention 分析 | **16** | vLLM 默认 block size |
+| 更细粒度的 subblock 分析 | **8** 或 **4** | 为 MemFabric subblock packing 做数据准备 |
+
+**设置方法**（所有脚本都支持 `KV_BLOCK_SIZE` 环境变量）：
+
+```bash
+# 默认 16
+./scripts/run_trace_ruler.sh
+
+# 对齐 vLLM FlashMLA
+KV_BLOCK_SIZE=64 ./scripts/run_trace_ruler.sh
+
+# 细粒度 subblock
+KV_BLOCK_SIZE=4 ./scripts/run_trace_ruler.sh
+```
+
+或直接传参：
+
+```bash
+python3 inference/run_dataset.py --ckpt-path "$CKPT_PATH" --config inference/config_671B_v3.2.json \
+  --dataset ruler --kv-block-size 64 --trace-out outputs/ruler_block64
+```
+
+### 8.5 四类 workload 跑数
 
 **在仓库根目录运行**（不是 `inference/` 目录）：
 
@@ -450,6 +489,9 @@ export CKPT_PATH=/data/models/deepseek-v3.2-exp-s
 
 # RULER（推荐首选，样本短、能跑通）
 ./scripts/run_trace_ruler.sh
+
+# 用 vLLM 对齐的 block size
+KV_BLOCK_SIZE=64 ./scripts/run_trace_ruler.sh
 
 # LongBench v2（大量超长样本会被跳过；先验证管线为主）
 ./scripts/run_trace_longbenchv2.sh
@@ -478,7 +520,7 @@ cat "$OUT/summary.json" | python3 -m json.tool
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--kv-block-size` | 16 | 逻辑 block 大小（token 数），建议对齐后续 PagedAttention |
+| `--kv-block-size` | 16 | 逻辑 block 大小（token 数）；见上方 8.4 节详细说明 |
 | `--trace-store-scores` | 关 | 开启后写全部 2048 分数（日志很大） |
 | `--trace-sample-rate` | 1.0 | step 采样率（0.1 = 10%） |
 | `--trace-prefix-key-tokens` | 256 | prefix hash 最大 token 数 |
