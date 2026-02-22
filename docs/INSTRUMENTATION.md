@@ -10,6 +10,10 @@
 
 这一步**只做采数，不做 KV 策略**。采集到的轨迹是后续设计"MemFabric subblock/packing、距离感知放置/副本/迁移、fetch vs recompute 边界"的必要输入。
 
+补充：如果你需要把**系统论文评测到底用的哪个数据集变体**（精确到 HF ID / 文件名 / split / trace schema）记录清楚，见：
+
+- `docs/SYSTEM_WORKLOAD_DATASETS.md`
+
 ---
 
 ## 2. DeepSeek-V3.2-Exp 模型长度限制
