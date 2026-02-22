@@ -22,6 +22,7 @@ set -uo pipefail
 #   TOTAL_LIMIT         - total samples to process; 0 = all (default: 0)
 #   MAX_NEW_TOKENS      - decode length cap (default: 64)
 #   KV_BLOCK_SIZE       - logical block size (default: 64)
+#   MAX_REQUESTS_PER_FILE - shard JSONL every N requests (default: 4; 0 = no sharding)
 #   MP                  - model parallel (default: 8)
 #   TEMPERATURE         - sampling temperature (default: 0.6)
 #   COOLDOWN_SECS       - seconds to wait after a crash before next chunk (default: 30)
@@ -35,6 +36,7 @@ CHUNK_SIZE="${CHUNK_SIZE:-100}"
 TOTAL_LIMIT="${TOTAL_LIMIT:-0}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-64}"
 KV_BLOCK_SIZE="${KV_BLOCK_SIZE:-64}"
+MAX_REQUESTS_PER_FILE="${MAX_REQUESTS_PER_FILE:-4}"
 MP="${MP:-8}"
 TEMPERATURE="${TEMPERATURE:-0.6}"
 COOLDOWN_SECS="${COOLDOWN_SECS:-30}"
@@ -105,6 +107,7 @@ while true; do
     --limit "${this_limit}"
     --max-new-tokens "${MAX_NEW_TOKENS}"
     --kv-block-size "${KV_BLOCK_SIZE}"
+    --max-requests-per-file "${MAX_REQUESTS_PER_FILE}"
     --temperature "${TEMPERATURE}"
     --trace-out "${chunk_out}"
     --seed "${offset}"

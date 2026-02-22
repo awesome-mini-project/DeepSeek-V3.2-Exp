@@ -73,7 +73,12 @@ esac
 case "${GEN}" in
   short)   export MAX_NEW_TOKENS=8  ;;
   default) export MAX_NEW_TOKENS=64 ;;
-  full)    export MAX_NEW_TOKENS=0  ;;
+  full)
+    export MAX_NEW_TOKENS=0
+    # Natural generation can produce very long traces; shard per-request to
+    # reduce risk of huge single files and improve crash recovery.
+    export MAX_REQUESTS_PER_FILE=1
+    ;;
   *)
     echo "ERROR: invalid GEN='${GEN}'. Must be one of: short, default, full" >&2
     exit 1

@@ -173,6 +173,7 @@ def main(
             sync_cuda_for_timing=bool(trace_sync_cuda),
             prefix_cache_key_tokens=int(trace_prefix_key_tokens),
         )
+        cfg = ds_trace.apply_env_overrides(cfg)
         tracer = ds_trace.init_tracer(cfg)
         tracer.set_run_meta(run_name=os.path.basename(trace_out.rstrip("/")), dataset="interactive" if interactive else "file")
         # Expose bytes/token for logical KV fetch estimation.

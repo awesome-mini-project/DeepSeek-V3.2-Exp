@@ -2,7 +2,7 @@ import json
 import os
 import time
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -78,9 +78,16 @@ class TraceConfig:
     sample_rate: float = 1.0
     rank0_only: bool = True
     sync_cuda_for_timing: bool = True
+    # Output schema controls (make large/derivable fields opt-in).
+    record_meta_per_record: bool = False
+    record_block_ids: bool = False
+    record_kv_fetch: bool = True
+    record_kv_fetch_latency_us: bool = False
+    record_kv_fetch_read_ops: bool = False
+    record_empty_tiers: bool = False
     enable_prefix_analysis: bool = False
     prefix_cache_key_tokens: int = 256
-    max_requests_per_file: int = 10  # shard JSONL every N requests; 0 = no split
+    max_requests_per_file: int = 4  # shard JSONL every N requests; 0 = no split
 
     @staticmethod
     def from_env() -> "TraceConfig":
@@ -121,9 +128,65 @@ class TraceConfig:
             sample_rate=_get_float("DS_TRACE_SAMPLE_RATE", 1.0),
             rank0_only=_get_bool("DS_TRACE_RANK0_ONLY", True),
             sync_cuda_for_timing=_get_bool("DS_TRACE_SYNC_CUDA", True),
+            record_meta_per_record=_get_bool("DS_TRACE_RECORD_META_PER_RECORD", False),
+            record_block_ids=_get_bool("DS_TRACE_RECORD_BLOCK_IDS", False),
+            record_kv_fetch=_get_bool("DS_TRACE_RECORD_KV_FETCH", True),
+            record_kv_fetch_latency_us=_get_bool("DS_TRACE_RECORD_KV_FETCH_LATENCY_US", False),
+            record_kv_fetch_read_ops=_get_bool("DS_TRACE_RECORD_KV_FETCH_READ_OPS", False),
+            record_empty_tiers=_get_bool("DS_TRACE_RECORD_EMPTY_TIERS", False),
             prefix_cache_key_tokens=_get_int("DS_TRACE_PREFIX_KEY_TOKENS", 256),
-            max_requests_per_file=_get_int("DS_TRACE_MAX_REQUESTS_PER_FILE", 10),
+            max_requests_per_file=_get_int("DS_TRACE_MAX_REQUESTS_PER_FILE", 4),
         )
+
+
+def apply_env_overrides(cfg: TraceConfig) -> TraceConfig:
+    """
+    Apply environment-variable overrides to an explicit TraceConfig.
+
+    This lets bash scripts control trace schema without adding more CLI flags.
+    """
+
+    def _get_bool(k: str) -> Optional[bool]:
+        v = os.getenv(k)
+        if v is None:
+            return None
+        return v.strip().lower() in ("1", "true", "yes", "y", "on")
+
+    def _get_int(k: str) -> Optional[int]:
+        v = os.getenv(k)
+        if v is None:
+            return None
+        try:
+            return int(v)
+        except ValueError:
+            return None
+
+    updates: Dict[str, Any] = {}
+    b = _get_bool("DS_TRACE_RECORD_META_PER_RECORD")
+    if b is not None:
+        updates["record_meta_per_record"] = b
+    b = _get_bool("DS_TRACE_RECORD_BLOCK_IDS")
+    if b is not None:
+        updates["record_block_ids"] = b
+    b = _get_bool("DS_TRACE_RECORD_KV_FETCH")
+    if b is not None:
+        updates["record_kv_fetch"] = b
+    b = _get_bool("DS_TRACE_RECORD_KV_FETCH_LATENCY_US")
+    if b is not None:
+        updates["record_kv_fetch_latency_us"] = b
+    b = _get_bool("DS_TRACE_RECORD_KV_FETCH_READ_OPS")
+    if b is not None:
+        updates["record_kv_fetch_read_ops"] = b
+    b = _get_bool("DS_TRACE_RECORD_EMPTY_TIERS")
+    if b is not None:
+        updates["record_empty_tiers"] = b
+    i = _get_int("DS_TRACE_MAX_REQUESTS_PER_FILE")
+    if i is not None:
+        updates["max_requests_per_file"] = int(i)
+    i = _get_int("DS_TRACE_KV_BLOCK_SIZE")
+    if i is not None:
+        updates["kv_block_size_tokens"] = int(i)
+    return replace(cfg, **updates) if updates else cfg
 
 
 @dataclass
@@ -195,7 +258,7 @@ class TraceWriter:
     File naming: trace_steps_{start}_{end}.jsonl (start/end are request IDs)
     """
 
-    def __init__(self, out_dir: str, filename: str = "trace_steps.jsonl", max_requests_per_file: int = 10):
+    def __init__(self, out_dir: str, filename: str = "trace_steps.jsonl", max_requests_per_file: int = 4):
         self.out_dir = Path(out_dir)
         _ensure_dir(self.out_dir)
         self.filename = filename
@@ -319,6 +382,7 @@ class Tracer:
         self.trace_dir = trace_dir
         self.writer = TraceWriter(trace_dir, max_requests_per_file=cfg.max_requests_per_file)
         self.ctx = TraceContext()
+        self._run_meta_written = False
         self._unique_blocks = _DistributionSummary()
         self._tokens_per_block = _DistributionSummary()
         self._offsets = _DistributionSummary()
@@ -326,6 +390,9 @@ class Tracer:
         self._intersection_ratio = []  # float values
         self._prefix_hot_blocks: Dict[int, Dict[int, int]] = {}  # request_id -> {block_id: count}
         self._pending_by_step: Dict[int, List[Dict[str, Any]]] = {}
+
+        if self.enabled:
+            self._write_run_meta()
 
     @property
     def enabled(self) -> bool:
@@ -338,6 +405,44 @@ class Tracer:
     def set_run_meta(self, run_name: str = "", dataset: str = "") -> None:
         self.ctx.run_name = run_name
         self.ctx.dataset = dataset
+        if self.enabled:
+            self._write_run_meta()
+
+    def _write_run_meta(self) -> None:
+        try:
+            p = Path(self.trace_dir) / "run_meta.json"
+            _ensure_dir(Path(self.trace_dir))
+            meta = {
+                "schema_version": 2,
+                "created_at_ms": _now_ms(),
+                "run_name": self.ctx.run_name,
+                "dataset": self.ctx.dataset,
+                "rank": _rank(),
+                "world_size": _world_size(),
+                "block_size_tokens": int(self.cfg.kv_block_size_tokens),
+                "max_requests_per_file": int(self.cfg.max_requests_per_file),
+                "config": {
+                    "store_scores_topk": bool(self.cfg.store_scores_topk),
+                    "store_selected_token_pos": bool(self.cfg.store_selected_token_pos),
+                    "sample_rate": float(self.cfg.sample_rate),
+                    "rank0_only": bool(self.cfg.rank0_only),
+                    "sync_cuda_for_timing": bool(self.cfg.sync_cuda_for_timing),
+                    "record_meta_per_record": bool(self.cfg.record_meta_per_record),
+                    "record_block_ids": bool(self.cfg.record_block_ids),
+                    "record_kv_fetch": bool(self.cfg.record_kv_fetch),
+                    "record_kv_fetch_latency_us": bool(self.cfg.record_kv_fetch_latency_us),
+                    "record_kv_fetch_read_ops": bool(self.cfg.record_kv_fetch_read_ops),
+                    "record_empty_tiers": bool(self.cfg.record_empty_tiers),
+                    "enable_prefix_analysis": bool(self.cfg.enable_prefix_analysis),
+                    "prefix_cache_key_tokens": int(self.cfg.prefix_cache_key_tokens),
+                },
+            }
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+            self._run_meta_written = True
+        except Exception:
+            # Best-effort; tracing must not crash on meta write errors.
+            pass
 
     def set_batch(self, request_ids: Sequence[int], prefix_infos: Optional[Sequence[RequestPrefixInfo]] = None) -> None:
         self.ctx.request_ids = [int(x) for x in request_ids]
@@ -352,6 +457,8 @@ class Tracer:
         if not self.enabled:
             return
         if step_wall_us is None:
+            return
+        if not self.cfg.record_kv_fetch_latency_us:
             return
         pending = self._pending_by_step.pop(int(step_idx), [])
         for rec in pending:
@@ -441,25 +548,7 @@ class Tracer:
                         hot[bid] = hot.get(bid, 0) + 1
                 self._intersection_ratio.append(float(intersection_ratio))
 
-            # C-point: HBM-only logical fetch stats (placeholder for future tiered fetch).
-            bytes_per_token = 0
-            # Try to infer bytes/token from env override; otherwise leave 0.
-            env_bpt = os.getenv("DS_TRACE_KV_BYTES_PER_TOKEN")
-            if env_bpt:
-                try:
-                    bytes_per_token = int(env_bpt)
-                except ValueError:
-                    bytes_per_token = 0
-            hbm_bytes_read = int(bytes_per_token * (len(unique_block_ids) * block_size))
-            hbm_read_ops = 1 if unique_block_ids else 0
-            latency_us = self.ctx.step_wall_us
-
             rec: Dict[str, Any] = {
-                "event": "dsa_topk",
-                "run_name": self.ctx.run_name,
-                "dataset": self.ctx.dataset,
-                "rank": _rank(),
-                "world_size": _world_size(),
                 "request_id": req_id,
                 "layer_id": int(layer_id),
                 "step_idx": int(start_pos),
@@ -468,32 +557,75 @@ class Tracer:
                 "offset_min": offset_min,
                 "offset_p50": offset_p50,
                 "offset_max": offset_max,
-                "block_size_tokens": block_size,
-                "selected_block_ids": unique_block_ids,
                 "unique_blocks": int(len(unique_block_ids)),
                 "total_blocks_in_use": int(total_blocks_in_use),
                 "touched_block_ratio": round(float(touched_ratio), 4),
-                "tokens_per_touched_block": {"mean": tpb_mean, "p50": tpb_p50, "p95": tpb_p95},
-                "kv_fetch": {
-                    "hbm": {
-                        "hit_blocks": unique_block_ids,
-                        "bytes_read": hbm_bytes_read,
-                        "read_ops": hbm_read_ops,
-                        "latency_us": latency_us,
-                        "batch_size": int(len(unique_block_ids)),
-                    },
-                    "local_pool": {"hit_blocks": [], "bytes_read": 0, "read_ops": 0, "latency_us": None, "batch_size": 0},
-                    "remote_pool": {"hit_blocks": [], "bytes_read": 0, "read_ops": 0, "latency_us": None, "batch_size": 0},
-                },
+                "tokens_per_touched_block": {"mean": round(float(tpb_mean), 2), "p50": tpb_p50, "p95": tpb_p95},
             }
+            if self.cfg.record_meta_per_record:
+                rec.update(
+                    {
+                        "event": "dsa_topk",
+                        "run_name": self.ctx.run_name,
+                        "dataset": self.ctx.dataset,
+                        "rank": _rank(),
+                        "world_size": _world_size(),
+                        "block_size_tokens": block_size,
+                    }
+                )
+
+            if self.cfg.record_block_ids:
+                rec["selected_block_ids"] = unique_block_ids
+
+            # C-point: HBM-only logical fetch stats (placeholder for future tiered fetch).
+            if self.cfg.record_kv_fetch:
+                bytes_per_token = 0
+                env_bpt = os.getenv("DS_TRACE_KV_BYTES_PER_TOKEN")
+                if env_bpt:
+                    try:
+                        bytes_per_token = int(env_bpt)
+                    except ValueError:
+                        bytes_per_token = 0
+                hbm_bytes_read = int(bytes_per_token * (len(unique_block_ids) * block_size))
+                hbm_read_ops = 1 if unique_block_ids else 0
+
+                hbm: Dict[str, Any] = {
+                    "bytes_read": hbm_bytes_read,
+                    "batch_size": int(len(unique_block_ids)),
+                }
+                if self.cfg.record_block_ids:
+                    hbm["hit_blocks"] = unique_block_ids
+                if self.cfg.record_kv_fetch_read_ops:
+                    hbm["read_ops"] = int(hbm_read_ops)
+                if self.cfg.record_kv_fetch_latency_us:
+                    hbm["latency_us"] = self.ctx.step_wall_us
+
+                kv_fetch: Dict[str, Any] = {"hbm": hbm}
+
+                # Only include empty tiers if explicitly requested.
+                if self.cfg.record_empty_tiers:
+                    kv_fetch["local_pool"] = {"bytes_read": 0, "batch_size": 0}
+                    kv_fetch["remote_pool"] = {"bytes_read": 0, "batch_size": 0}
+                    if self.cfg.record_block_ids:
+                        kv_fetch["local_pool"]["hit_blocks"] = []
+                        kv_fetch["remote_pool"]["hit_blocks"] = []
+                    if self.cfg.record_kv_fetch_read_ops:
+                        kv_fetch["local_pool"]["read_ops"] = 0
+                        kv_fetch["remote_pool"]["read_ops"] = 0
+                    if self.cfg.record_kv_fetch_latency_us:
+                        kv_fetch["local_pool"]["latency_us"] = None
+                        kv_fetch["remote_pool"]["latency_us"] = None
+
+                rec["kv_fetch"] = kv_fetch
             if self.cfg.enable_prefix_analysis:
                 rec["prefix"] = {
                     "prefix_cache_hit": prefix_hit,
                     "prefix_cached_blocks": prefix_cached_blocks,
                     "prefix_key": prefix_key,
                     "intersection_ratio": intersection_ratio,
-                    "intersection_blocks": intersection_blocks,
                 }
+                if self.cfg.record_block_ids:
+                    rec["prefix"]["intersection_blocks"] = intersection_blocks
 
             if self.cfg.store_selected_token_pos:
                 rec["selected_token_pos"] = selected
@@ -508,7 +640,7 @@ class Tracer:
                     "max": float(s.max().item()),
                 }
 
-            if latency_us is None and self.ctx.step_idx is not None:
+            if self.cfg.record_kv_fetch and self.cfg.record_kv_fetch_latency_us and (self.ctx.step_wall_us is None) and (self.ctx.step_idx is not None):
                 self._pending_by_step.setdefault(int(self.ctx.step_idx), []).append(rec)
             else:
                 self.writer.write(rec)
@@ -578,6 +710,8 @@ def init_tracer(cfg: Optional[TraceConfig] = None) -> Tracer:
     global _GLOBAL_TRACER
     if cfg is None:
         cfg = TraceConfig.from_env()
+    else:
+        cfg = apply_env_overrides(cfg)
     _GLOBAL_TRACER = Tracer(cfg)
     return _GLOBAL_TRACER
 

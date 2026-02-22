@@ -11,10 +11,11 @@ set -euo pipefail
 # - MP: model-parallel world size (default: 8)
 # - LIMIT: number of examples (default: 64)
 # - BATCH_SIZE: batch size (default: 1)
-# - KV_BLOCK_SIZE: logical KV block size in tokens (default: 16)
+# - KV_BLOCK_SIZE: logical KV block size in tokens (default: 64)
 # - MAX_NEW_TOKENS: decode length cap (default: 64)
 # - MAX_PROMPT_TOKENS: skip prompts longer than this (default: 16384; prefill is dense O(S^2), long prompts OOM)
 # - RULER_TGZ: which RULER archive to use (default: data_debug.tgz; alternative: data_100_samples.tgz)
+# - MAX_REQUESTS_PER_FILE: shard JSONL every N requests (default: 4; 0 = no sharding)
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CKPT_PATH="${CKPT_PATH:?Please set CKPT_PATH}"
@@ -27,6 +28,7 @@ MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-64}"
 MAX_PROMPT_TOKENS="${MAX_PROMPT_TOKENS:-16384}"
 TEMPERATURE="${TEMPERATURE:-0.6}"
 RULER_TGZ="${RULER_TGZ:-data_debug.tgz}"
+MAX_REQUESTS_PER_FILE="${MAX_REQUESTS_PER_FILE:-4}"
 
 # Force HuggingFace caches to live under the repo (avoid ~/.cache/huggingface).
 DATA_ROOT="${DATAS_DIR:-${DATA_ROOT:-${ROOT_DIR}/data}}"
@@ -58,6 +60,7 @@ ARGS=(
   --limit "${LIMIT}"
   --batch-size "${BATCH_SIZE}"
   --kv-block-size "${KV_BLOCK_SIZE}"
+  --max-requests-per-file "${MAX_REQUESTS_PER_FILE}"
   --max-new-tokens "${MAX_NEW_TOKENS}"
   --max-prompt-tokens "${MAX_PROMPT_TOKENS}"
   --temperature "${TEMPERATURE}"

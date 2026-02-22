@@ -141,6 +141,7 @@ def main() -> None:
         sync_cuda_for_timing=not bool(args.trace_no_sync_cuda),
         prefix_cache_key_tokens=int(args.trace_prefix_key_tokens),
     )
+    cfg = ds_trace.apply_env_overrides(cfg)
     tracer = ds_trace.init_tracer(cfg)
     tracer.set_run_meta(run_name=os.path.basename(trace_out.rstrip("/")), dataset="burstgpt")
     bytes_per_token = int((model.layers[0].attn.kv_cache.size(-1) * model.layers[0].attn.kv_cache.element_size()) +

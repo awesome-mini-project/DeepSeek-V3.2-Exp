@@ -117,12 +117,12 @@ KV cache 显存开销（bsz=1）：
 
 | 字段 | 说明 |
 |---|---|
-| `block_size_tokens` | 逻辑 block 大小（由 `--kv-block-size` 控制，默认 64，对齐 vLLM） |
-| `selected_block_ids` | 去重后的 block ID 列表 |
+| `block_size_tokens` | 逻辑 block 大小（由 `--kv-block-size` 控制，默认 64，对齐 vLLM；**默认写在 `run_meta.json`**，不再每行重复） |
+| `selected_block_ids` | 去重后的 block ID 列表（可由 `selected_token_pos` + `block_size_tokens` 离线计算；**默认不写入 JSONL**，用环境变量开启） |
 | `unique_blocks` | `\|B_t\|`（去重 block 数） |
 | `total_blocks_in_use` | 当前序列实际占用的总 block 数（= `ceil(end_pos / block_size)`） |
 | `touched_block_ratio` | **DSA 选中的 block 占当前已用 block 的比例**（= `unique_blocks / total_blocks_in_use`） |
-| `tokens_per_touched_block` | 每个被触及 block 里用了多少 token 的统计：`{mean, p50, p95}` |
+| `tokens_per_touched_block` | 每个被触及 block 里用了多少 token 的统计：`{mean, p50, p95}`（`mean` 默认保留 2 位小数） |
 
 ### 3.3 插桩点 C：KV 取数与搬运代价
 
@@ -133,13 +133,13 @@ KV cache 显存开销（bsz=1）：
 
 | 字段 | 说明 |
 |---|---|
-| `kv_fetch.hbm.hit_blocks` | HBM 命中的 block 列表（= `selected_block_ids`） |
+| `kv_fetch.hbm.hit_blocks` | HBM 命中的 block 列表（= `selected_block_ids`；可离线推导；**默认不写入 JSONL**） |
 | `kv_fetch.hbm.bytes_read` | 估算的读取字节数（按 block 数 × bytes_per_token × block_size） |
-| `kv_fetch.hbm.read_ops` | 读操作次数（当前硬编码 1；占位符，接入外部 KV 后按实际填入） |
-| `kv_fetch.hbm.latency_us` | **整个 step（61 层）的 wall-time**（微秒），不是单层延迟；同一 step 的所有层记录的值相同 |
+| `kv_fetch.hbm.read_ops` | 读操作次数（占位符，接入外部 KV 后按实际填入；**默认不写入 JSONL**） |
+| `kv_fetch.hbm.latency_us` | **整个 step（61 层）的 wall-time**（微秒），不是单层延迟；同一 step 的所有层记录的值相同（**默认不写入 JSONL**） |
 | `kv_fetch.hbm.batch_size` | 一次 batch_get 覆盖的 block 数 |
-| `kv_fetch.local_pool.*` | 预留占位（全 0） |
-| `kv_fetch.remote_pool.*` | 预留占位（全 0） |
+| `kv_fetch.local_pool.*` | 预留占位（默认省略空 tier；可用环境变量强制写出） |
+| `kv_fetch.remote_pool.*` | 预留占位（默认省略空 tier；可用环境变量强制写出） |
 
 ### 3.4 插桩点 D：Prefix cache 交互
 
@@ -239,28 +239,28 @@ trace 文件会写到 `--trace-out` 下按 block size 命名的子目录里：
 ```
 outputs/ruler_1771772829/
 └── block64/                            ← kv-block-size=64 的 trace
-    ├── trace_steps_0_10.jsonl         ← request 0~9 的全部 trace（所有 layer × 所有 step）
-    ├── trace_steps_10_20.jsonl        ← request 10~19
-    ├── trace_steps_20_27.jsonl        ← request 20~26（最后一片，实际 request 数）
+    ├── trace_steps_0_4.jsonl          ← request 0~3 的全部 trace（所有 layer × 所有 step）
+    ├── trace_steps_4_8.jsonl          ← request 4~7
+    ├── trace_steps_8_11.jsonl         ← request 8~10（最后一片，实际 request 数）
+    ├── run_meta.json                  ← 运行元信息（run_name/dataset/rank/world_size/block_size 等）
     └── summary.json
 ```
 
 - 子目录名 `block64` 来自 `--kv-block-size 64`，你可以用不同 block size 跑多次，结果会在不同子目录并排存放
 - **JSONL 按 request 数分片**（不是按记录数）：每个 request 的所有 decode step × 所有 layer 的 trace 保证在同一片里
 - 文件名 `{start}_{end}` 表示 request ID 范围（从文件名就能看出跑了多少条 request）
-- 分片大小由 `--max-requests-per-file` 控制（默认 10；设 0 不分片，全写一个文件）
+- 分片大小由 `--max-requests-per-file` 控制（默认 **4**；设 0 不分片，全写一个文件）
+- 在 `scripts/run_trace_*.sh` 里，可用环境变量 `MAX_REQUESTS_PER_FILE` 覆盖该值（脚本会透传到 `--max-requests-per-file`）
 
 ### 5.2 `trace_steps.jsonl` 每行 schema
 
-每行是一个 `event=dsa_topk` 记录（**每 decode step × 每 request × 每 layer**）：
+每行是一条 **DSA top-k 记录**（**每 decode step × 每 request × 每 layer**）。
+
+默认为了减小体积，JSONL **不再重复写** `event/run_name/dataset/rank/world_size/block_size_tokens`，
+这些固定/重复信息会写到同目录的 `run_meta.json`。
 
 ```json
 {
-  "event": "dsa_topk",
-  "run_name": "ruler_1771772829",
-  "dataset": "ruler",
-  "rank": 0,
-  "world_size": 8,
   "request_id": 0,
   "layer_id": 5,
   "step_idx": 42,
@@ -269,26 +269,32 @@ outputs/ruler_1771772829/
   "offset_min": 0,
   "offset_p50": 21,
   "offset_max": 42,
-  "block_size_tokens": 16,
-  "selected_block_ids": [0, 1, 2],
   "unique_blocks": 3,
+  "total_blocks_in_use": 3,
+  "touched_block_ratio": 1.0,
   "tokens_per_touched_block": {"mean": 14.3, "p50": 16, "p95": 16},
   "kv_fetch": {
-    "hbm":        {"hit_blocks": [0,1,2], "bytes_read": 55296, "read_ops": 1, "latency_us": 417074, "batch_size": 3},
-    "local_pool": {"hit_blocks": [],      "bytes_read": 0,     "read_ops": 0, "latency_us": null,   "batch_size": 0},
-    "remote_pool":{"hit_blocks": [],      "bytes_read": 0,     "read_ops": 0, "latency_us": null,   "batch_size": 0}
+    "hbm": {"bytes_read": 55296, "batch_size": 3}
   },
   "prefix": {
     "prefix_cache_hit": false,
     "prefix_cached_blocks": 0,
     "prefix_key": "a1b2c3...",
-    "intersection_ratio": 0.0,
-    "intersection_blocks": []
+    "intersection_ratio": 0.0
   },
   "selected_token_pos": [0, 5, 1, 2, 4, 3, ...],
   "scores_stats": {"min": -4.77, "mean": -2.13, "max": 1.22}
 }
 ```
+
+**可选字段开关（环境变量）**：
+
+- `DS_TRACE_RECORD_META_PER_RECORD=1`（默认 0）：每行重新写回 `event/run_name/dataset/rank/world_size/block_size_tokens`
+- `DS_TRACE_RECORD_BLOCK_IDS=1`（默认 0）：写出 `selected_block_ids`、`kv_fetch.hbm.hit_blocks`，并让 `prefix.intersection_blocks` 出现在 JSONL
+- `DS_TRACE_RECORD_KV_FETCH_LATENCY_US=1`（默认 0）：写出 `kv_fetch.hbm.latency_us`
+- `DS_TRACE_RECORD_KV_FETCH_READ_OPS=1`（默认 0）：写出 `kv_fetch.hbm.read_ops`
+- `DS_TRACE_RECORD_EMPTY_TIERS=1`（默认 0）：即使 local/remote 为空也写出 `kv_fetch.local_pool` / `kv_fetch.remote_pool`
+- `DS_TRACE_RECORD_KV_FETCH=0`（默认 1）：完全不写 `kv_fetch`
 
 ### 5.3 `summary.json` schema
 
@@ -515,6 +521,10 @@ python3 inference/run_dataset.py --ckpt-path "$CKPT_PATH" --config inference/con
 - **`DATA`**：取多少条样本（`smoke`=2 / `default`=64 / `full`=全部）
 - **`GEN`**：每条样本生成多少 token（`short`=8 / `default`=64 / `full`=直到 EOS）
 
+当 `GEN=full`（自然生成、trace 最大）时，`run_all_traces.sh` 会自动设置：
+
+- `MAX_REQUESTS_PER_FILE=1`（每个 request 一个 JSONL 分片，降低单文件体积与崩溃损失面）
+
 ```bash
 export CKPT_PATH=/data/models/deepseek-v3.2-exp-s
 
@@ -576,10 +586,12 @@ export BURSTGPT_CSV="data/burstgpt/burstgpt_train_limit2000.csv"
 ```bash
 # 以 RULER 为例
 OUT=$(ls -td outputs/ruler_* | head -1)
-ls -lh "$OUT"
-wc -l "$OUT/trace_steps.jsonl"
-head -1 "$OUT/trace_steps.jsonl" | python3 -m json.tool
-cat "$OUT/summary.json" | python3 -m json.tool
+ls -lh "$OUT/block64"
+ls -lh "$OUT/block64/run_meta.json" "$OUT/block64/summary.json"
+wc -l "$OUT"/block64/trace_steps_*.jsonl
+head -1 "$OUT"/block64/trace_steps_*.jsonl | python3 -m json.tool
+cat "$OUT/block64/run_meta.json" | python3 -m json.tool
+cat "$OUT/block64/summary.json" | python3 -m json.tool
 ```
 
 ### 8.6 通用参数速查
@@ -595,7 +607,7 @@ cat "$OUT/summary.json" | python3 -m json.tool
 | `--max-new-tokens` | 64/32 | 每条样本最多生成的 token 数 |
 | `--max-prompt-tokens` | 16384 | 超过此长度的 prompt 跳过（防 prefill OOM） |
 | `--max-new-tokens` | 64 | 每条样本最多生成 token 数；**设 0 = 直到 EOS 或 max_seq_len** |
-| `--max-requests-per-file` | 10 | JSONL 按 request 数分片：每 10 个 request 换一个文件（0 = 不分片） |
+| `--max-requests-per-file` | **4** | JSONL 按 request 数分片：每 4 个 request 换一个文件（0 = 不分片） |
 | `--batch-size` | 1 | 每批同时推理的 request 数（若 > config `max_batch_size`，runner 会自动扩大预分配） |
 | `--temperature` | 0.6 | 采样温度（0 = greedy argmax，完全确定性） |
 | `--ruler-tgz` | data_debug.tgz | RULER 包选择（或 data_100_samples.tgz） |

@@ -255,7 +255,7 @@ def main() -> None:
     parser.add_argument("--trace-sample-rate", type=float, default=1.0)
     parser.add_argument("--trace-prefix-key-tokens", type=int, default=256)
     parser.add_argument("--trace-no-sync-cuda", action="store_true")
-    parser.add_argument("--max-requests-per-file", type=int, default=10)
+    parser.add_argument("--max-requests-per-file", type=int, default=4)
     parser.add_argument("--max-prompt-tokens", type=int, default=0)
     parser.add_argument("--chat-system-prompt", type=str, default="")
     parser.add_argument("--sharegpt-json", type=str, default="")
@@ -301,6 +301,7 @@ def main() -> None:
         prefix_cache_key_tokens=int(args.trace_prefix_key_tokens),
         max_requests_per_file=int(args.max_requests_per_file),
     )
+    cfg = ds_trace.apply_env_overrides(cfg)
     tracer = ds_trace.init_tracer(cfg)
     tracer.set_run_meta(run_name=os.path.basename(trace_out.rstrip("/")), dataset=args.dataset)
     bytes_per_token = int((model.layers[0].attn.kv_cache.size(-1) * model.layers[0].attn.kv_cache.element_size()) +
