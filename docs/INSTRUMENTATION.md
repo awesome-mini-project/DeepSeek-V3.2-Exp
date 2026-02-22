@@ -34,17 +34,26 @@
 `ModelArgs.max_seq_len` 的 **dataclass 默认值**是 `4096 * 4 = 16,384`。
 `config_671B_v3.2.json` 现已显式设置 `"max_seq_len": 163840`（与官方 `max_position_embeddings` 对齐）。
 
-KV cache / indexer cache 都是按 `max_seq_len` **预分配**的固定张量，显存开销估算：
+**`max_batch_size` 与 `max_seq_len` 的含义**：
 
-| max_seq_len | 8 batch x 61 layers KV cache |
+- 这两个值**不是运行时的 batch size / seq len**，而是**预分配 KV cache 张量的最大维度**
+- 模型初始化时按 `(max_batch_size, max_seq_len, dim)` 一次性分配 GPU 显存
+- 实际运行时的 `bsz` 只需 <= `max_batch_size` 即可
+
+当前 trace 采集场景下 **`max_batch_size=1`**（runner 的 `--batch-size` 默认 1，一条一条跑），
+这样 KV cache 只分配 1 份，显存开销最小：
+
+| max_seq_len | bsz=1, 61 layers KV cache |
 |---|---|
-| 16,384 | ~10 GB |
-| 65,536 | ~39 GB |
-| 131,072 | ~78 GB |
-| 163,840 (当前配置) | ~97 GB |
+| 16,384 | ~1.2 GB |
+| 65,536 | ~5 GB |
+| 131,072 | ~10 GB |
+| 163,840 (当前配置) | ~12 GB |
 
-8x B200（每卡 192GB HBM）下 163,840 完全放得下（每卡约 12 GB KV cache）。
-如果你显存不够，可以在 config 里减小此值或减小 `max_batch_size`。
+8x B200（每卡 192GB HBM）下完全放得下。如果后续需要批量推理，把 config 里 `max_batch_size` 调大即可（例如 4 或 8）。
+
+**Trace 只在 rank 0 收集**：本模型是 tensor parallelism（所有 rank 处理同一批 request，只是各自算不同 head 分片）。
+`Indexer.forward()` 里 topk 选完后会 `dist.broadcast + assert` 验证所有 rank 结果一致，因此只在 rank 0 写一份 trace 即可。
 
 ### 2.3 对数据集的影响（基于 max_seq_len=163840）
 
@@ -458,17 +467,11 @@ cat "$OUT/summary.json" | python3 -m json.tool
 - 当前没有真实的 vLLM PagedAttention，因此 **B 点 block_id 是逻辑近似**
 - 当前没有外部 KV，因此 **C 点为 HBM-only**；`kv_fetch` 字段保持 tier 结构，便于后续接入 MemFabric/MemCache/Mooncake
 - 当前没有真实 prefix cache，因此 **D 点是复用关系分析**（基于 prefix hash）
-- 当前 demo `max_seq_len=16384`，无法跑 LongBench v2 的超长样本；后续如需真实长上下文轨迹，需接入 vLLM + PagedAttention
+- 当前 demo `max_seq_len=163840`（~160K），超过此长度的样本仍会被跳过；后续如需更长上下文轨迹，需接入 vLLM + PagedAttention
 
 ---
 
 ## 11. 常见问题排查
-
-### `ModuleNotFoundError: torch`
-
-```bash
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cu121
-```
 
 ### HuggingFace 下载失败 / 需要权限
 
@@ -486,7 +489,7 @@ python3 -m pip install torch --index-url https://download.pytorch.org/whl/cu121
 
 ### LongBench v2 跑完但 trace 为空
 
-大量样本超过 `max_seq_len=16384` 被跳过。运行后检查：
+超过 `max_seq_len` 的样本会被跳过。运行后检查：
 
 ```bash
 wc -l outputs/longbenchv2_*/trace_steps.jsonl
