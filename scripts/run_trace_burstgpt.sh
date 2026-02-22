@@ -24,7 +24,7 @@ MP="${MP:-8}"
 LIMIT="${LIMIT:-256}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 KV_BLOCK_SIZE="${KV_BLOCK_SIZE:-64}"
-MAX_NEW_TOKENS_CAP="${MAX_NEW_TOKENS_CAP:-64}"
+MAX_NEW_TOKENS_CAP="${MAX_NEW_TOKENS_CAP:-${MAX_NEW_TOKENS:-64}}"
 TEMPERATURE="${TEMPERATURE:-0.6}"
 
 # Force HuggingFace caches to live under the repo (avoid ~/.cache/huggingface).

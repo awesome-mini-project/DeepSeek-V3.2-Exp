@@ -91,6 +91,9 @@ echo "  MP              = ${MP:-8}"
 echo "  TEMPERATURE     = ${TEMPERATURE:-0.6}"
 echo ""
 
+# Suppress torchrun OMP_NUM_THREADS warning (GPU-bound, 1 thread is optimal).
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+
 FAILED=()
 
 run_one() {

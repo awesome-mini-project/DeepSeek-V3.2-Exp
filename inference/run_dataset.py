@@ -271,6 +271,8 @@ def main() -> None:
     if rank != 0:
         global print
         print = lambda *_, **__: None
+        import warnings
+        warnings.filterwarnings("ignore")
     torch.set_default_dtype(torch.bfloat16)
     torch.set_num_threads(8)
     torch.manual_seed(33377335 + args.seed)
