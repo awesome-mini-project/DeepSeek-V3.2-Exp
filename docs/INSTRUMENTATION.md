@@ -32,34 +32,50 @@
 ### 2.2 本推理 demo 的实际上限
 
 `ModelArgs.max_seq_len` 的 **dataclass 默认值**是 `4096 * 4 = 16,384`。
-`config_671B_v3.2.json` 现已显式设置 `"max_seq_len": 163840`（与官方 `max_position_embeddings` 对齐）。
+`config_671B_v3.2.json` 显式设置 `"max_seq_len": 16384`。
+
+**为什么不设成官方的 163,840？**
+
+虽然模型位置编码支持 163K，但这个 demo 的 **prefill 阶段用的是 dense MHA（不走 DSA）**，
+attention score 矩阵大小为 O(S^2)。在 8x B200（每卡 ~178GB，模型占 ~150GB）上：
+
+| prompt 长度 S | prefill score 矩阵（每卡） | 能否跑 |
+|---|---|---|
+| 4,096 | ~0.5 GB | OK |
+| 16,384 | ~8 GB | OK |
+| 32,768 | ~32 GB | 勉强（接近剩余显存） |
+| 65,536 | ~128 GB | OOM |
+| 131,072 | ~512 GB | 远超单卡 |
+
+因此 `max_seq_len=16384` 是当前 demo 在不 OOM 的前提下的安全上限。
+超过此长度的 prompt 会被 runner 自动跳过（`max_prompt_tokens = max_seq_len - max_new_tokens`）。
+
+> 如需跑更长 prompt，需要接入 vLLM / SGLang 等支持 FlashAttention / chunked prefill 的框架。
+> DSA 的 top-2048 稀疏只在 decode 阶段生效；16K 的 decode 阶段已经足够展示 DSA 的非局部选择行为。
 
 **`max_batch_size` 与 `max_seq_len` 的含义**：
 
 - 这两个值**不是运行时的 batch size / seq len**，而是**预分配 KV cache 张量的最大维度**
 - 模型初始化时按 `(max_batch_size, max_seq_len, dim)` 一次性分配 GPU 显存
 - 实际运行时的 `bsz` 只需 <= `max_batch_size` 即可
+- `max_batch_size` 的 dataclass 默认值是 8；当前设为 1（trace 采集 bsz=1，省显存）
 
-当前 trace 采集场景下 **`max_batch_size=1`**（runner 的 `--batch-size` 默认 1，一条一条跑），
-这样 KV cache 只分配 1 份，显存开销最小：
+KV cache 显存开销（bsz=1）：
 
-| max_seq_len | bsz=1, 61 layers KV cache |
+| max_seq_len | 61 layers KV cache |
 |---|---|
-| 16,384 | ~1.2 GB |
+| 16,384 (当前配置) | ~1.2 GB |
 | 65,536 | ~5 GB |
 | 131,072 | ~10 GB |
-| 163,840 (当前配置) | ~12 GB |
-
-8x B200（每卡 192GB HBM）下完全放得下。如果后续需要批量推理，把 config 里 `max_batch_size` 调大即可（例如 4 或 8）。
 
 **Trace 只在 rank 0 收集**：本模型是 tensor parallelism（所有 rank 处理同一批 request，只是各自算不同 head 分片）。
 `Indexer.forward()` 里 topk 选完后会 `dist.broadcast + assert` 验证所有 rank 结果一致，因此只在 rank 0 写一份 trace 即可。
 
-### 2.3 对数据集的影响（基于 max_seq_len=163840）
+### 2.3 对数据集的影响（基于 max_seq_len=16384）
 
-- **RULER**（debug 包 ~4K tokens）：绝大部分样本能跑进去
-- **ShareGPT**（对话通常 < 4K tokens）：大部分样本可跑
-- **LongBench v2**（上下文可达 272K tokens）：超过 163K 的样本仍会被跳过，但大部分（8K~128K）可以跑
+- **RULER**（debug 包 ~4K tokens）：绝大部分样本能跑进去，**推荐首选**
+- **ShareGPT**（对话通常 < 4K tokens）：大部分样本可跑，**推荐**
+- **LongBench v2**（上下文可达 272K tokens）：大量样本超 16K 会被跳过；只有 `length=short` 的少量样本能跑
 - **BurstGPT**（合成 prompt，长度可控）：按 `req_tokens` 生成，可以完全控制在限制内
 
 ---
@@ -468,7 +484,7 @@ cat "$OUT/summary.json" | python3 -m json.tool
 - 当前没有真实的 vLLM PagedAttention，因此 **B 点 block_id 是逻辑近似**
 - 当前没有外部 KV，因此 **C 点为 HBM-only**；`kv_fetch` 字段保持 tier 结构，便于后续接入 MemFabric/MemCache/Mooncake
 - 当前没有真实 prefix cache，因此 **D 点是复用关系分析**（基于 prefix hash）
-- 当前 demo `max_seq_len=163840`（~160K），超过此长度的样本仍会被跳过；后续如需更长上下文轨迹，需接入 vLLM + PagedAttention
+- 当前 demo `max_seq_len=16384`，受 prefill dense O(S^2) 限制无法跑更长；后续需接入 vLLM + FlashAttention 才能采集长上下文轨迹
 
 ---
 

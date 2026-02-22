@@ -1,6 +1,6 @@
 {
     "max_batch_size": 1,
-    "max_seq_len": 163840,
+    "max_seq_len": 16384,
     "vocab_size": 129280,
     "dim": 7168,
     "inter_dim": 18432,
