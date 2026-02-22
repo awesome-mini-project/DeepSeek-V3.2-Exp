@@ -510,24 +510,39 @@ python3 inference/run_dataset.py --ckpt-path "$CKPT_PATH" --config inference/con
 **推荐用 `scripts/run_all_traces.sh`**，它会按顺序跑 RULER → LongBench v2 → ShareGPT → BurstGPT，
 自动处理 BurstGPT CSV 下载，并打印每一步的耗时。
 
+**两个独立维度**控制运行规模：
+
+- **`DATA`**：取多少条样本（`smoke`=2 / `default`=64 / `full`=全部）
+- **`GEN`**：每条样本生成多少 token（`short`=8 / `default`=64 / `full`=直到 EOS）
+
 ```bash
 export CKPT_PATH=/data/models/deepseek-v3.2-exp-s
 
-# 默认模式：每个数据集取 64 条，最多生成 64 token
+# 默认（64 条 × 64 token）
 ./scripts/run_all_traces.sh
 
-# Smoke test：每个数据集只跑 2 条，最多 8 token（快速验证管线）
-MODE=smoke ./scripts/run_all_traces.sh
+# Smoke test（2 条 × 8 token，几十秒验证管线）
+DATA=smoke GEN=short ./scripts/run_all_traces.sh
 
-# Full 模式：跑完整数据集，生成直到 EOS
-MODE=full ./scripts/run_all_traces.sh
+# 全部数据但短生成（所有样本 × 64 token）
+DATA=full GEN=default ./scripts/run_all_traces.sh
+
+# 少量数据但自然生成（64 条 × 直到 EOS）
+DATA=default GEN=full ./scripts/run_all_traces.sh
+
+# 全量采集（所有样本 × 直到 EOS，可能跑几小时）
+DATA=full GEN=full ./scripts/run_all_traces.sh
 ```
 
-| MODE | LIMIT | MAX_NEW_TOKENS | 用途 |
-|---|---|---|---|
-| `default` | 64 | 64 | 日常采集（~250K 条 trace，几分钟到几十分钟） |
-| `smoke` | 2 | 8 | 快速验证管线是否跑通（~几千条 trace，几十秒） |
-| `full` | 0（不限） | 0（直到 EOS） | 全量采集（trace 很大，可能跑几小时） |
+| DATA | GEN | LIMIT | MAX_NEW_TOKENS | 用途 |
+|---|---|---|---|---|
+| `smoke` | `short` | 2 | 8 | 管线验证（~几千条 trace，几十秒） |
+| `default` | `default` | 64 | 64 | 日常采集（~250K 条 trace，几分钟~几十分钟） |
+| `full` | `default` | 全部 | 64 | 全数据集扫描（控制 decode 长度） |
+| `default` | `full` | 64 | 直到 EOS | 观察自然生成长度下的 DSA 行为 |
+| `full` | `full` | 全部 | 直到 EOS | exhaustive（trace 很大） |
+
+向后兼容：`MODE=smoke/default/full` 仍然可用（等价于 DATA 和 GEN 同时设置）。
 
 也可以**单独跑某个数据集**（在仓库根目录）：
 

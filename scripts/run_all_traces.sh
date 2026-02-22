@@ -3,22 +3,34 @@ set -euo pipefail
 
 # Run DSA trace collection on all four datasets in one go.
 #
-# Usage:
-#   ./scripts/run_all_traces.sh              # default mode (64 samples each)
-#   MODE=smoke ./scripts/run_all_traces.sh   # smoke test (2 samples each, fast)
-#   MODE=full  ./scripts/run_all_traces.sh   # full dataset (all samples)
+# Two independent dimensions control the run scale:
+#
+#   DATA=smoke|default|full    How many samples to take from each dataset
+#   GEN=short|default|full     How many tokens to generate per sample
+#
+# Combinations (examples):
+#   DATA=smoke   GEN=short    → 2 samples, 8 tokens   (pipeline smoke test, ~30s)
+#   DATA=default GEN=default  → 64 samples, 64 tokens  (daily trace collection)
+#   DATA=full    GEN=default  → all samples, 64 tokens  (full data, controlled decode)
+#   DATA=default GEN=full     → 64 samples, until EOS   (natural generation length)
+#   DATA=full    GEN=full     → all samples, until EOS   (exhaustive, may take hours)
+#
+# Shorthand MODE still works for backward compatibility:
+#   MODE=smoke   → DATA=smoke  GEN=short
+#   MODE=default → DATA=default GEN=default
+#   MODE=full    → DATA=full   GEN=full
 #
 # Required env:
-#   CKPT_PATH   - converted checkpoint directory
+#   CKPT_PATH     - converted checkpoint directory
 #
 # Optional env:
-#   MODE          - "default" / "smoke" / "full" (default: "default")
-#   CKPT_PATH     - model checkpoint path (required)
-#   KV_BLOCK_SIZE - logical block size (default: 64)
-#   MP            - model parallel world size (default: 8)
-#   TEMPERATURE   - sampling temperature (default: 0.6; 0 = deterministic)
-#   BURSTGPT_LIMIT - how many rows to export from BurstGPT CSV (default: 2000)
-#   SKIP_DOWNLOAD  - set to 1 to skip BurstGPT CSV download if already exists
+#   DATA / GEN       - see above (default: "default" / "default")
+#   MODE             - shorthand (overridden by explicit DATA/GEN)
+#   KV_BLOCK_SIZE    - logical block size (default: 64)
+#   MP               - model parallel world size (default: 8)
+#   TEMPERATURE      - sampling temperature (default: 0.6; 0 = deterministic)
+#   BURSTGPT_LIMIT   - rows to export from BurstGPT HF (default: 2000)
+#   SKIP_DOWNLOAD    - set to 1 to skip BurstGPT CSV download if already exists
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -27,32 +39,58 @@ MODE="${MODE:-default}"
 BURSTGPT_LIMIT="${BURSTGPT_LIMIT:-2000}"
 SKIP_DOWNLOAD="${SKIP_DOWNLOAD:-0}"
 
-case "${MODE}" in
+# Apply MODE shorthand if DATA/GEN not explicitly set.
+if [[ -z "${DATA:-}" ]]; then
+  case "${MODE}" in
+    smoke)   DATA=smoke   ;;
+    full)    DATA=full    ;;
+    *)       DATA=default ;;
+  esac
+fi
+if [[ -z "${GEN:-}" ]]; then
+  case "${MODE}" in
+    smoke)   GEN=short   ;;
+    full)    GEN=full    ;;
+    *)       GEN=default ;;
+  esac
+fi
+
+# --- DATA dimension: how many samples ---
+case "${DATA}" in
   smoke)
     export LIMIT=2
-    export MAX_NEW_TOKENS=8
-    echo "=== SMOKE TEST MODE: 2 samples, 8 max_new_tokens ==="
     ;;
   full)
     export LIMIT=0
-    export MAX_NEW_TOKENS=0
-    echo "=== FULL MODE: all samples, generate until EOS ==="
     ;;
   *)
     export LIMIT=64
-    export MAX_NEW_TOKENS=64
-    echo "=== DEFAULT MODE: 64 samples, 64 max_new_tokens ==="
+    DATA=default
     ;;
 esac
 
+# --- GEN dimension: how many tokens per sample ---
+case "${GEN}" in
+  short)
+    export MAX_NEW_TOKENS=8
+    ;;
+  full)
+    export MAX_NEW_TOKENS=0
+    ;;
+  *)
+    export MAX_NEW_TOKENS=64
+    GEN=default
+    ;;
+esac
+
+echo "=== run_all_traces.sh ==="
+echo "  DATA=${DATA}  (LIMIT=${LIMIT})"
+echo "  GEN=${GEN}   (MAX_NEW_TOKENS=${MAX_NEW_TOKENS})"
 echo ""
-echo "CKPT_PATH       = ${CKPT_PATH}"
-echo "MODE            = ${MODE}"
-echo "LIMIT           = ${LIMIT}"
-echo "MAX_NEW_TOKENS  = ${MAX_NEW_TOKENS}"
-echo "KV_BLOCK_SIZE   = ${KV_BLOCK_SIZE:-64}"
-echo "MP              = ${MP:-8}"
-echo "TEMPERATURE     = ${TEMPERATURE:-0.6}"
+echo "  CKPT_PATH       = ${CKPT_PATH}"
+echo "  KV_BLOCK_SIZE   = ${KV_BLOCK_SIZE:-64}"
+echo "  MP              = ${MP:-8}"
+echo "  TEMPERATURE     = ${TEMPERATURE:-0.6}"
 echo ""
 
 run_one() {
@@ -70,12 +108,15 @@ run_one() {
   echo ""
 }
 
+# --- Run all four datasets ---
+
 run_one "RULER" "${ROOT_DIR}/scripts/run_trace_ruler.sh"
 
 run_one "LongBench-v2" "${ROOT_DIR}/scripts/run_trace_longbenchv2.sh"
 
 run_one "ShareGPT" "${ROOT_DIR}/scripts/run_trace_sharegpt.sh"
 
+# BurstGPT: download CSV if needed, then run.
 BURSTGPT_CSV="${ROOT_DIR}/data/burstgpt/burstgpt_train_limit${BURSTGPT_LIMIT}.csv"
 if [[ "${SKIP_DOWNLOAD}" != "1" ]] || [[ ! -f "${BURSTGPT_CSV}" ]]; then
   echo "[BurstGPT] Downloading CSV (LIMIT=${BURSTGPT_LIMIT})..."
