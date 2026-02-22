@@ -911,3 +911,28 @@ outputs/ruler_chunked_xxx/
 ├── chunk_2_offset200/block64/...    ← 跳过崩溃后继续
 └── ...
 ```
+
+---
+
+## 9. Trace 后处理与分析
+
+采集完 trace 后，可以用 `analysis/` 目录下的脚本对 JSONL 进行离线分析，计算 KV 放置策略相关指标。
+
+详见：**[docs/ANALYSIS.md](ANALYSIS.md)**
+
+常用快速命令：
+
+```bash
+# 分析某一次 run
+python3 analysis/analyze_trace.py --input outputs/ruler_12345/block64
+
+# 多 block size what-if
+python3 analysis/analyze_trace.py \
+  --input outputs/ruler_12345/block64 \
+  --block-sizes 16,32,64,128
+
+# 跨层合并后的 step 级工作集
+python3 analysis/analyze_trace.py \
+  --input outputs/ruler_12345/block64 \
+  --step-union --key-mode request
+```
