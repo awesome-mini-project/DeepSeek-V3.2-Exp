@@ -473,6 +473,8 @@ torchrun --nproc-per-node 8 generate.py \
 `--kv-block-size` 决定了 trace 里 **token→block 映射的粒度**（`block_id = token_pos // kv_block_size`）。
 它不影响模型推理本身（demo 没有真实 PagedAttention），只影响 trace 里 block 级别的统计。
 
+补充：如果你想对齐不同 serving 引擎的 paged-KV 习惯取值（例如 vLLM/FlashInfer/TRT-LLM 的默认/常用 block/page size），见 `docs/KV_BLOCK_SIZE.md`。
+
 **默认值 64（对齐 vLLM 官方配置）**：
 
 根据 vLLM 官方博文和 recipe（[vLLM Blog: DeepSeek-V3.2-Exp](https://blog.vllm.ai/2025/09/29/deepseek-v3-2.html)）：
